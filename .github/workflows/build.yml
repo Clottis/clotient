@@ -245,7 +245,7 @@ jobs:
             | 🪟 Windows | `.msi` | Installer |
             | 🪟 Windows | `.exe` | NSIS Installer |
 
-            🌐 **Website:** https://clottis.github.io/clotient/
+            🌐 **Website:** https://clotient.clottis.net/
 
             ---
             🔗 [Report Issues](https://github.com/${{ github.repository }}/issues)

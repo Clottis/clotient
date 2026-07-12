@@ -1,8 +1,12 @@
 import { useState, useEffect, useRef } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Code2, Database, Plus, RotateCcw, Search, Settings, Trash2, X } from "lucide-react";
 import packageJson from "../package.json";
 import "./App.css";
 import Sidebar from "./components/Sidebar";
+import type { ResourceMetrics } from "./components/Sidebar";
 import RequestBuilder from "./components/RequestBuilder";
 import ResponseViewer from "./components/ResponseViewer";
 import CodeGenerator from "./components/CodeGenerator";
@@ -11,12 +15,183 @@ import { executeScript, SandboxContext } from "./utils/scriptSandbox";
 import { resolveVariables } from "./utils/envResolver";
 
 const uuid = () => Math.random().toString(36).substring(2, 11);
+const storageKey = (fileName: string) => `clotient:${fileName}`;
+const REPOSITORY_URL = "https://github.com/Irfan-Ahmad-byte/clotient";
+const hasTauriRuntime = () => typeof window !== "undefined" && Boolean((window as any).__TAURI_INTERNALS__);
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+const SIDEBAR_MIN = 245;
+const SIDEBAR_MAX = 380;
+const SIDEBAR_COLLAPSED_WIDTH = 56;
+const RESPONSE_MIN = 420;
+const RESPONSE_MAX = 760;
+const RESPONSE_COLLAPSED_WIDTH = 48;
+const BUILDER_MIN = 560;
+const CONSOLE_MIN = 96;
+const CONSOLE_MAX = 280;
+const readStoredNumber = (key: string, fallback: number) => {
+  if (typeof window === "undefined") return fallback;
+  const value = Number(localStorage.getItem(storageKey(key)));
+  return Number.isFinite(value) ? value : fallback;
+};
+const readStoredBool = (key: string, fallback: boolean) => {
+  if (typeof window === "undefined") return fallback;
+  const value = localStorage.getItem(storageKey(key));
+  if (value === null) return fallback;
+  return value === "true";
+};
+
+interface LocalHttpRequest {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body_type: string;
+  body_text: string | null;
+  form_data: [string, string][] | null;
+  timeout_ms: number;
+}
+
+interface LocalHttpResponse {
+  status: number;
+  status_text: string;
+  headers: Record<string, string>;
+  body: string;
+  time_ms: number;
+  size_bytes: number;
+  content_type: string;
+}
+
+interface AppSettings {
+  autoSave: boolean;
+  requestTimeoutMs: number;
+  compactResponse: boolean;
+  confirmBeforeDelete: boolean;
+}
+
+interface SaveNotice {
+  type: "idle" | "dirty" | "saving" | "saved" | "error";
+  message: string;
+  detail?: string;
+}
+
+const defaultSettings: AppSettings = {
+  autoSave: true,
+  requestTimeoutMs: 30000,
+  compactResponse: false,
+  confirmBeforeDelete: true
+};
+
+async function loadAppData(fileName: string) {
+  if (hasTauriRuntime()) {
+    return invoke<string>("load_data", { fileName });
+  }
+  return localStorage.getItem(storageKey(fileName)) || "";
+}
+
+async function saveAppData(fileName: string, content: string) {
+  if (hasTauriRuntime()) {
+    await invoke("save_data", { fileName, content });
+    return;
+  }
+  localStorage.setItem(storageKey(fileName), content);
+}
+
+async function clearAppDataStorage() {
+  if (hasTauriRuntime()) {
+    await invoke("clear_local_storage");
+  }
+  Object.keys(localStorage)
+    .filter((key) => key.startsWith("clotient:"))
+    .forEach((key) => localStorage.removeItem(key));
+  if ("caches" in window) {
+    const cacheNames = await window.caches.keys();
+    await Promise.all(
+      cacheNames
+        .filter((name) => name.toLowerCase().includes("clotient"))
+        .map((name) => window.caches.delete(name))
+    );
+  }
+}
+
+async function sendHttpRequest(req: LocalHttpRequest): Promise<LocalHttpResponse> {
+  if (hasTauriRuntime()) {
+    return invoke<LocalHttpResponse>("send_http_request", { req });
+  }
+
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), req.timeout_ms || 30000);
+  const headers = new Headers(req.headers);
+  let body: BodyInit | undefined;
+
+  if (req.body_type === "json" || req.body_type === "raw") {
+    body = req.body_text || undefined;
+  } else if (req.body_type === "urlencoded" && req.form_data) {
+    const params = new URLSearchParams();
+    req.form_data.forEach(([key, value]) => params.append(key, value));
+    body = params;
+  } else if (req.body_type === "form-data" && req.form_data) {
+    const form = new FormData();
+    req.form_data.forEach(([key, value]) => form.append(key, value));
+    body = form;
+  }
+
+  const startedAt = performance.now();
+  try {
+    const response = await fetch(req.url, {
+      method: req.method,
+      headers,
+      body: req.method === "GET" || req.method === "HEAD" ? undefined : body,
+      signal: controller.signal
+    });
+    const responseBody = await response.text();
+    const responseHeaders: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
+    });
+    return {
+      status: response.status,
+      status_text: response.statusText,
+      headers: responseHeaders,
+      body: responseBody,
+      time_ms: Math.round(performance.now() - startedAt),
+      size_bytes: new TextEncoder().encode(responseBody).length,
+      content_type: response.headers.get("content-type") || "text/plain"
+    };
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / Math.pow(1024, index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+function estimateLocalStorageBytes() {
+  if (typeof localStorage === "undefined") return 0;
+  let total = 0;
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (!key?.startsWith("clotient:")) continue;
+    total += new TextEncoder().encode(`${key}${localStorage.getItem(key) || ""}`).length;
+  }
+  return total;
+}
+
+function estimateJsonBytes(value: unknown) {
+  try {
+    return new TextEncoder().encode(JSON.stringify(value)).length;
+  } catch {
+    return 0;
+  }
+}
 
 const createNewBlankRequest = (name: string = "New Request"): ClotientRequest => ({
   id: uuid(),
   name,
   method: "GET",
-  url: "https://httpbin.org/get",
+  url: "http://localhost:3000/v1/users",
   headers: [],
   params: [],
   body: { type: "none", rawText: "", urlencoded: [], formData: [] },
@@ -27,39 +202,89 @@ const createNewBlankRequest = (name: string = "New Request"): ClotientRequest =>
 const defaultCollections: ClotientCollection[] = [
   {
     id: uuid(),
-    name: "HTTPBin Demo API",
-    folders: [],
+    name: "Users API",
+    folders: [
+      {
+        id: uuid(),
+        name: "Auth API",
+        requests: [
+          {
+            id: uuid(),
+            name: "/v1/auth/login",
+            method: "POST",
+            url: "http://localhost:3000/v1/auth/login",
+            headers: [{ id: uuid(), key: "Content-Type", value: "application/json", enabled: true }],
+            params: [],
+            body: {
+              type: "json",
+              rawText: `{\n  "email": "jane.cooper@example.com",\n  "password": "{{password}}"\n}`,
+              urlencoded: [],
+              formData: []
+            },
+            scripts: {
+              preRequest: "",
+              postRequest: `cs.assert(cs.response.status < 500, "Server responded");`
+            },
+            auth: { type: "none" }
+          }
+        ]
+      },
+      {
+        id: uuid(),
+        name: "System API",
+        requests: [
+          {
+            id: uuid(),
+            name: "/v1/health",
+            method: "GET",
+            url: "http://localhost:3000/v1/health",
+            headers: [],
+            params: [],
+            body: { type: "none", rawText: "", urlencoded: [], formData: [] },
+            scripts: { preRequest: "", postRequest: "" },
+            auth: { type: "none" }
+          }
+        ]
+      }
+    ],
     requests: [
       {
         id: uuid(),
-        name: "GET JSON Data",
+        name: "/v1/users",
         method: "GET",
-        url: "https://httpbin.org/json",
+        url: "http://localhost:3000/v1/users?page=1&limit=20&sort=created_at&order=desc",
         headers: [{ id: uuid(), key: "Accept", value: "application/json", enabled: true }],
-        params: [],
+        params: [
+          { id: uuid(), key: "page", value: "1", description: "Page number", enabled: true },
+          { id: uuid(), key: "limit", value: "20", description: "Items per page", enabled: true },
+          { id: uuid(), key: "sort", value: "created_at", description: "Sort field", enabled: false },
+          { id: uuid(), key: "order", value: "desc", description: "Sort order", enabled: false }
+        ],
         body: { type: "none", rawText: "", urlencoded: [], formData: [] },
         scripts: {
-          preRequest: `cs.log("Pre-request executed!");\ncs.request.headers.add("X-Pre-Header", "added-value");`,
-          postRequest: `cs.log("Post-request executing assertions...");\ncs.assert(cs.response.status === 200, "Response status should be 200 OK");\nconst parsed = cs.response.json();\ncs.assert(parsed.slideshow !== undefined, "Verify slides list exists");`
+          preRequest: `cs.log("Preparing users request");`,
+          postRequest: `cs.assert(cs.response.status === 200, "Response status should be 200 OK");`
         },
         auth: { type: "none" }
       },
       {
         id: uuid(),
-        name: "POST Echo Variables",
-        method: "POST",
-        url: "https://httpbin.org/post",
-        headers: [{ id: uuid(), key: "Content-Type", value: "application/json", enabled: true }],
+        name: "/v1/users/:id",
+        method: "PUT",
+        url: "http://localhost:3000/v1/users/usr_1",
+        headers: [
+          { id: uuid(), key: "Content-Type", value: "application/json", enabled: true },
+          { id: uuid(), key: "Authorization", value: "Bearer {{token}}", enabled: true }
+        ],
         params: [],
         body: {
           type: "json",
-          rawText: `{\n  "app": "Clotient",\n  "status": "ready",\n  "env_value": "{{host}}"\n}`
+          rawText: `{\n  "name": "Jane Cooper",\n  "role": "admin"\n}`,
+          urlencoded: [],
+          formData: []
         },
-        scripts: {
-          preRequest: `cs.log("Setting header pre-request");`,
-          postRequest: `cs.assert(cs.response.status === 200, "Should echo back 200 status");`
-        },
-        auth: { type: "none" }
+        scripts: { preRequest: "", postRequest: "" },
+        auth: { type: "bearer", bearerToken: "{{token}}" }
       }
     ]
   }
@@ -68,13 +293,137 @@ const defaultCollections: ClotientCollection[] = [
 const defaultEnvironments: Environment[] = [
   {
     id: uuid(),
-    name: "Demo Environment",
+    name: "Local",
     variables: [
-      { id: uuid(), key: "host", value: "https://httpbin.org", enabled: true },
-      { id: uuid(), key: "token", value: "demo_secure_token_12345", enabled: true }
+      { id: uuid(), key: "host", value: "http://localhost:3000", enabled: true },
+      { id: uuid(), key: "token", value: "local_dev_token", enabled: true },
+      { id: uuid(), key: "password", value: "local-password", enabled: true }
     ]
   }
 ];
+
+const demoResponse: HttpResponsePayload = {
+  status: 200,
+  statusText: "OK",
+  headers: {
+    "content-type": "application/json",
+    "cache-control": "no-cache",
+    "x-request-id": "req_local_demo",
+    "set-cookie": "session=demo; Path=/; HttpOnly"
+  },
+  body: JSON.stringify(
+    {
+      data: [
+        {
+          id: "usr_1",
+          name: "Jane Cooper",
+          email: "jane.cooper@example.com",
+          role: "admin",
+          created_at: "2024-05-20T14:23:11.000Z"
+        },
+        {
+          id: "usr_2",
+          name: "Cody Fisher",
+          email: "cody.fisher@example.com",
+          role: "user",
+          created_at: "2024-05-20T14:23:11.000Z"
+        }
+      ],
+      meta: {
+        page: 1,
+        limit: 20,
+        total: 125,
+        pages: 7
+      }
+    },
+    null,
+    2
+  ),
+  timeMs: 184,
+  sizeBytes: 12400,
+  contentType: "application/json"
+};
+
+function isOldBuiltInDemo(collections: ClotientCollection[]) {
+  return collections.length === 1 && collections[0]?.name === "HTTPBin Demo API";
+}
+
+function isDefaultUsersRequest(request: ClotientRequest | null) {
+  return request?.name === "/v1/users" && request.url.includes("/v1/users");
+}
+
+function useResourceMetrics({
+  collections,
+  environments,
+  history,
+  logs,
+  response,
+  loading,
+  errorMsg
+}: {
+  collections: ClotientCollection[];
+  environments: Environment[];
+  history: HistoryItem[];
+  logs: string[];
+  response: HttpResponsePayload | null;
+  loading: boolean;
+  errorMsg: string;
+}): ResourceMetrics {
+  const previousStorage = useRef<number | null>(null);
+  const [metrics, setMetrics] = useState<ResourceMetrics>({
+    memory: "0 B",
+    storage: "0 B",
+    load: "0%",
+    delta: "+0 B",
+    live: false
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const sample = async () => {
+      const memoryInfo = (performance as Performance & {
+        memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number };
+      }).memory;
+      const estimatedDataBytes = estimateJsonBytes({ collections, environments, history, logs, response, errorMsg });
+      const memoryBytes = memoryInfo?.usedJSHeapSize || estimatedDataBytes;
+
+      let storageEstimate: StorageEstimate | null = null;
+      try {
+        storageEstimate = navigator.storage?.estimate ? await navigator.storage.estimate() : null;
+      } catch {
+        storageEstimate = null;
+      }
+      const storageBytes = storageEstimate?.usage || estimateLocalStorageBytes();
+      const previous = previousStorage.current ?? storageBytes;
+      previousStorage.current = storageBytes;
+
+      const recentRequests = history.filter((item) => Date.now() - item.timestamp < 60_000).length;
+      const responseWeight = response ? Math.min(18, response.timeMs / 60 + response.sizeBytes / 100_000) : 0;
+      const logWeight = Math.min(18, logs.length * 2 + (errorMsg ? 10 : 0));
+      const loadScore = clamp(Math.round((loading ? 42 : 4) + recentRequests * 6 + responseWeight + logWeight), 0, 100);
+
+      if (!cancelled) {
+        setMetrics({
+          memory: formatBytes(memoryBytes),
+          storage: formatBytes(storageBytes),
+          load: `${loadScore}%`,
+          delta: `${storageBytes >= previous ? "+" : "-"}${formatBytes(Math.abs(storageBytes - previous))}`,
+          live: Boolean(memoryInfo || storageEstimate)
+        });
+      }
+    };
+
+    sample();
+    const interval = window.setInterval(sample, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [collections, environments, history, logs, response, loading, errorMsg]);
+
+  return metrics;
+}
 
 export default function App() {
   // Navigation & Active state
@@ -83,6 +432,19 @@ export default function App() {
   const [activeRequest, setActiveRequest] = useState<ClotientRequest | null>(null);
   const [activeEnv, setActiveEnv] = useState<Environment | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [globalSearch, setGlobalSearch] = useState("");
+  const [showGlobalSearch, setShowGlobalSearch] = useState(false);
+  const [openTabIds, setOpenTabIds] = useState<string[]>([]);
+  const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [saveNotice, setSaveNotice] = useState<SaveNotice>({ type: "idle", message: "All changes local" });
+  const [saveToast, setSaveToast] = useState<SaveNotice | null>(null);
+  const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
+  const [sidebarWidth, setSidebarWidth] = useState(() => clamp(readStoredNumber("layout:sidebarWidth", 305), SIDEBAR_MIN, SIDEBAR_MAX));
+  const [responseWidth, setResponseWidth] = useState(() => clamp(readStoredNumber("layout:responseWidth", 610), RESPONSE_MIN, RESPONSE_MAX));
+  const [consoleHeight, setConsoleHeight] = useState(() => clamp(readStoredNumber("layout:consoleHeight", 150), CONSOLE_MIN, CONSOLE_MAX));
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStoredBool("layout:sidebarCollapsed", false));
+  const [responseCollapsed, setResponseCollapsed] = useState(() => readStoredBool("layout:responseCollapsed", false));
 
   // App load states
   const [loadingApp, setLoadingApp] = useState(true);
@@ -97,6 +459,9 @@ export default function App() {
 
   // Cancellation reference
   const activeRequestId = useRef<string | null>(null);
+  const mainRef = useRef<HTMLDivElement | null>(null);
+  const saveToastTimer = useRef<number | null>(null);
+  const autoSaveSeen = useRef({ collections: false, environments: false, history: false });
 
   // App-level Custom prompt dialog modal
   const [promptOpen, setPromptOpen] = useState(false);
@@ -116,29 +481,44 @@ export default function App() {
     document.title = `Clotient Studio - v${packageJson.version}`;
     async function loadData() {
       try {
-        const collectionsStr: string = await invoke("load_data", { fileName: "collections.json" });
-        const environmentsStr: string = await invoke("load_data", { fileName: "environments.json" });
-        const historyStr: string = await invoke("load_data", { fileName: "history.json" });
+        const collectionsStr = await loadAppData("collections.json");
+        const environmentsStr = await loadAppData("environments.json");
+        const historyStr = await loadAppData("history.json");
+        const settingsStr = await loadAppData("settings.json");
 
-        const loadedCollections = collectionsStr ? JSON.parse(collectionsStr) : defaultCollections;
-        const loadedEnvironments = environmentsStr ? JSON.parse(environmentsStr) : defaultEnvironments;
+        const parsedCollections = collectionsStr ? JSON.parse(collectionsStr) : defaultCollections;
+        const parsedEnvironments = environmentsStr ? JSON.parse(environmentsStr) : defaultEnvironments;
+        const loadedCollections = isOldBuiltInDemo(parsedCollections) ? defaultCollections : parsedCollections;
+        const loadedEnvironments = isOldBuiltInDemo(parsedCollections) ? defaultEnvironments : parsedEnvironments;
         const loadedHistory = historyStr ? JSON.parse(historyStr) : [];
+        const loadedSettings = settingsStr ? { ...defaultSettings, ...JSON.parse(settingsStr) } : defaultSettings;
 
         setCollections(loadedCollections);
         setEnvironments(loadedEnvironments);
         setHistory(loadedHistory);
+        setSettings(loadedSettings);
 
         // Set default active request
+        let initialRequest: ClotientRequest | null = null;
         if (loadedCollections.length > 0) {
           if (loadedCollections[0].requests.length > 0) {
-            setActiveRequest(loadedCollections[0].requests[0]);
+            initialRequest = loadedCollections[0].requests[0];
           } else if (loadedCollections[0].folders.length > 0 && loadedCollections[0].folders[0].requests.length > 0) {
-            setActiveRequest(loadedCollections[0].folders[0].requests[0]);
+            initialRequest = loadedCollections[0].folders[0].requests[0];
           } else {
-            setActiveRequest(createNewBlankRequest());
+            initialRequest = createNewBlankRequest();
           }
         } else {
-          setActiveRequest(createNewBlankRequest());
+          initialRequest = createNewBlankRequest();
+        }
+        setActiveRequest(initialRequest);
+        if (initialRequest) {
+          setOpenTabIds([initialRequest.id]);
+        }
+        if (isDefaultUsersRequest(initialRequest)) {
+          setResponse(demoResponse);
+          setLogs(["GET http://localhost:3000/v1/users?page=1&limit=20&sort=created_at&order=desc", "Response received", "JSON parsed", "Request completed"]);
+          setAssertions([{ passed: true, message: "Response status should be 200 OK" }]);
         }
 
         // Set active environment
@@ -150,7 +530,9 @@ export default function App() {
         setCollections(defaultCollections);
         setEnvironments(defaultEnvironments);
         setHistory([]);
+        setSettings(defaultSettings);
         setActiveRequest(defaultCollections[0].requests[0]);
+        setOpenTabIds([defaultCollections[0].requests[0].id]);
         if (defaultEnvironments.length > 0) {
           setActiveEnv(defaultEnvironments[0]);
         }
@@ -165,39 +547,235 @@ export default function App() {
   // 2. Auto-save changes to disk on data modifications
   useEffect(() => {
     if (!loaded) return;
-    async function saveData() {
+    if (!autoSaveSeen.current.collections) {
+      autoSaveSeen.current.collections = true;
+      return;
+    }
+    setSaveNotice({ type: "dirty", message: "Unsaved changes" });
+    if (!settings.autoSave) return;
+    const timer = window.setTimeout(async () => {
+      setSaveNotice({ type: "saving", message: "Auto-saving..." });
       try {
-        await invoke("save_data", { fileName: "collections.json", content: JSON.stringify(collections) });
+        await saveAppData("collections.json", JSON.stringify(collections));
+        setSaveNotice({ type: "saved", message: "Auto-saved locally" });
       } catch (e) {
         console.error("Save collections failed", e);
+        setSaveNotice({ type: "error", message: "Auto-save failed", detail: e instanceof Error ? e.message : String(e) });
       }
-    }
-    saveData();
-  }, [collections, loaded]);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [collections, loaded, settings.autoSave]);
 
   useEffect(() => {
     if (!loaded) return;
-    async function saveData() {
+    if (!autoSaveSeen.current.environments) {
+      autoSaveSeen.current.environments = true;
+      return;
+    }
+    setSaveNotice({ type: "dirty", message: "Unsaved changes" });
+    if (!settings.autoSave) return;
+    const timer = window.setTimeout(async () => {
+      setSaveNotice({ type: "saving", message: "Auto-saving..." });
       try {
-        await invoke("save_data", { fileName: "environments.json", content: JSON.stringify(environments) });
+        await saveAppData("environments.json", JSON.stringify(environments));
+        setSaveNotice({ type: "saved", message: "Auto-saved locally" });
       } catch (e) {
         console.error("Save environments failed", e);
+        setSaveNotice({ type: "error", message: "Auto-save failed", detail: e instanceof Error ? e.message : String(e) });
       }
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [environments, loaded, settings.autoSave]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    if (!autoSaveSeen.current.history) {
+      autoSaveSeen.current.history = true;
+      return;
     }
-    saveData();
-  }, [environments, loaded]);
+    setSaveNotice({ type: "dirty", message: "Unsaved changes" });
+    if (!settings.autoSave) return;
+    const timer = window.setTimeout(async () => {
+      setSaveNotice({ type: "saving", message: "Auto-saving..." });
+      try {
+        await saveAppData("history.json", JSON.stringify(history));
+        setSaveNotice({ type: "saved", message: "Auto-saved locally" });
+      } catch (e) {
+        console.error("Save history failed", e);
+        setSaveNotice({ type: "error", message: "Auto-save failed", detail: e instanceof Error ? e.message : String(e) });
+      }
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [history, loaded, settings.autoSave]);
 
   useEffect(() => {
     if (!loaded) return;
     async function saveData() {
       try {
-        await invoke("save_data", { fileName: "history.json", content: JSON.stringify(history) });
+        await saveAppData("settings.json", JSON.stringify(settings));
       } catch (e) {
-        console.error("Save history failed", e);
+        console.error("Save settings failed", e);
+        setSaveNotice({ type: "error", message: "Settings save failed", detail: e instanceof Error ? e.message : String(e) });
       }
     }
     saveData();
-  }, [history, loaded]);
+  }, [settings, loaded]);
+
+  useEffect(() => {
+    localStorage.setItem(storageKey("layout:sidebarWidth"), String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    localStorage.setItem(storageKey("layout:responseWidth"), String(responseWidth));
+  }, [responseWidth]);
+
+  useEffect(() => {
+    localStorage.setItem(storageKey("layout:consoleHeight"), String(consoleHeight));
+  }, [consoleHeight]);
+
+  useEffect(() => {
+    localStorage.setItem(storageKey("layout:sidebarCollapsed"), String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    localStorage.setItem(storageKey("layout:responseCollapsed"), String(responseCollapsed));
+  }, [responseCollapsed]);
+
+  useEffect(() => {
+    const normalizeResponseWidth = () => {
+      const mainWidth = mainRef.current?.clientWidth || window.innerWidth - sidebarWidth;
+      const maxForViewport = Math.min(RESPONSE_MAX, Math.max(RESPONSE_MIN, mainWidth - BUILDER_MIN));
+      setResponseWidth((current) => clamp(current, RESPONSE_MIN, maxForViewport));
+    };
+
+    normalizeResponseWidth();
+    window.addEventListener("resize", normalizeResponseWidth);
+    return () => window.removeEventListener("resize", normalizeResponseWidth);
+  }, [sidebarWidth]);
+
+  const resourceMetrics = useResourceMetrics({
+    collections,
+    environments,
+    history,
+    logs,
+    response,
+    loading: loadingRequest,
+    errorMsg
+  });
+
+  const beginResize = (event: ReactMouseEvent, onMove: (deltaX: number, deltaY: number) => void, cursor = "col-resize") => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const previousCursor = document.body.style.cursor;
+    const previousSelect = document.body.style.userSelect;
+    document.body.style.cursor = cursor;
+    document.body.style.userSelect = "none";
+
+    const handleMove = (moveEvent: globalThis.MouseEvent) => {
+      onMove(moveEvent.clientX - startX, moveEvent.clientY - startY);
+    };
+    const handleUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousSelect;
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+  };
+
+  const handleSidebarResize = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const startWidth = sidebarWidth;
+    beginResize(event, (deltaX) => {
+      setSidebarWidth(clamp(startWidth + deltaX, SIDEBAR_MIN, SIDEBAR_MAX));
+    }, "col-resize");
+  };
+
+  const handleResponseResize = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const startWidth = responseWidth;
+    const mainWidth = mainRef.current?.clientWidth || window.innerWidth - sidebarWidth;
+    beginResize(event, (deltaX) => {
+      setResponseWidth(clamp(startWidth - deltaX, RESPONSE_MIN, Math.min(RESPONSE_MAX, Math.max(RESPONSE_MIN, mainWidth - BUILDER_MIN))));
+    }, "col-resize");
+  };
+
+  const handleConsoleResize = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const startHeight = consoleHeight;
+    beginResize(event, (_deltaX, deltaY) => {
+      setConsoleHeight(clamp(startHeight - deltaY, CONSOLE_MIN, CONSOLE_MAX));
+    }, "row-resize");
+  };
+
+  const handleOpenRepository = async () => {
+    if (hasTauriRuntime()) {
+      await openUrl(REPOSITORY_URL);
+      return;
+    }
+    window.open(REPOSITORY_URL, "_blank", "noopener,noreferrer");
+  };
+
+  const handleResetLayout = () => {
+    setSidebarWidth(305);
+    setResponseWidth(610);
+    setConsoleHeight(150);
+    setSidebarCollapsed(false);
+    setResponseCollapsed(false);
+    localStorage.removeItem(storageKey("layout:sidebarWidth"));
+    localStorage.removeItem(storageKey("layout:responseWidth"));
+    localStorage.removeItem(storageKey("layout:consoleHeight"));
+    localStorage.removeItem(storageKey("layout:sidebarCollapsed"));
+    localStorage.removeItem(storageKey("layout:responseCollapsed"));
+    setSaveNotice({ type: "saved", message: "Layout reset" });
+  };
+
+  const handleClearRuntimeCache = async () => {
+    setHistory([]);
+    clearRequestRuntime();
+    try {
+      await saveAppData("history.json", JSON.stringify([]));
+      setSaveNotice({ type: "saved", message: "Runtime cache cleared" });
+    } catch (e) {
+      setSaveNotice({ type: "error", message: "Clear cache failed", detail: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
+  const handleClearLocalStorage = async () => {
+    const confirmed = window.confirm(
+      "Clear all local Clotient data? This removes collections, environments, history, settings, layout, and Clotient cache from this device."
+    );
+    if (!confirmed) return;
+
+    const savingNotice: SaveNotice = { type: "saving", message: "Clearing local storage..." };
+    setSaveNotice(savingNotice);
+    showSaveToast(savingNotice);
+    try {
+      await clearAppDataStorage();
+      autoSaveSeen.current = { collections: false, environments: false, history: false };
+      setCollections(defaultCollections);
+      setEnvironments(defaultEnvironments);
+      setHistory([]);
+      setSettings(defaultSettings);
+      setSidebarWidth(305);
+      setResponseWidth(610);
+      setConsoleHeight(150);
+      setSidebarCollapsed(false);
+      setResponseCollapsed(false);
+      const initialRequest = defaultCollections[0]?.requests[0] || createNewBlankRequest();
+      setActiveRequest(initialRequest);
+      setOpenTabIds([initialRequest.id]);
+      setActiveEnv(defaultEnvironments[0] || null);
+      clearRequestRuntime();
+      const savedNotice: SaveNotice = { type: "saved", message: "Local storage cleared", detail: "Workspace reset on this device" };
+      setSaveNotice(savedNotice);
+      showSaveToast(savedNotice);
+    } catch (e) {
+      const errorNotice: SaveNotice = { type: "error", message: "Clear storage failed", detail: e instanceof Error ? e.message : String(e) };
+      setSaveNotice(errorNotice);
+      showSaveToast(errorNotice);
+    }
+  };
 
   // Handler to update selected request details in collections mapping
   const handleActiveRequestChange = (updated: ClotientRequest) => {
@@ -229,6 +807,42 @@ export default function App() {
         return c;
       })
     );
+  };
+
+  const showSaveToast = (notice: SaveNotice) => {
+    setSaveToast(notice);
+    if (saveToastTimer.current) {
+      window.clearTimeout(saveToastTimer.current);
+    }
+    saveToastTimer.current = window.setTimeout(() => setSaveToast(null), notice.type === "saving" ? 1400 : 3200);
+  };
+
+  const clearRequestRuntime = () => {
+    setResponse(null);
+    setLogs([]);
+    setAssertions([]);
+    setErrorMsg("");
+  };
+
+  const handleManualSave = async () => {
+    const savingNotice: SaveNotice = { type: "saving", message: "Saving changes..." };
+    setSaveNotice(savingNotice);
+    showSaveToast(savingNotice);
+    try {
+      await Promise.all([
+        saveAppData("collections.json", JSON.stringify(collections)),
+        saveAppData("environments.json", JSON.stringify(environments)),
+        saveAppData("history.json", JSON.stringify(history)),
+        saveAppData("settings.json", JSON.stringify(settings))
+      ]);
+      const savedNotice: SaveNotice = { type: "saved", message: "Saved locally", detail: new Date().toLocaleTimeString() };
+      setSaveNotice(savedNotice);
+      showSaveToast(savedNotice);
+    } catch (e) {
+      const errorNotice: SaveNotice = { type: "error", message: "Save failed", detail: e instanceof Error ? e.message : String(e) };
+      setSaveNotice(errorNotice);
+      showSaveToast(errorNotice);
+    }
   };
 
   // 3. Main Query Dispatcher
@@ -347,16 +961,14 @@ export default function App() {
 
     // C. Dispatch Request to Rust Backend Command
     try {
-      const rustRes: any = await invoke("send_http_request", {
-        req: {
-          url,
-          method: requestCopy.method,
-          headers: headersMap,
-          body_type: requestCopy.body.type,
-          body_text: bodyText,
-          form_data: formDataList,
-          timeout_ms: 30000
-        }
+      const rustRes = await sendHttpRequest({
+        url,
+        method: requestCopy.method,
+        headers: headersMap,
+        body_type: requestCopy.body.type,
+        body_text: bodyText,
+        form_data: formDataList,
+        timeout_ms: settings.requestTimeoutMs
       });
 
       // Abort updating UI states if request was cancelled
@@ -524,6 +1136,8 @@ export default function App() {
       })
     );
     setActiveRequest(newReq);
+    setOpenTabIds((prev) => [...prev.filter((id) => id !== newReq.id), newReq.id].slice(-8));
+    clearRequestRuntime();
   };
 
   const handleDeleteRequest = (collectionId: string, folderId: string | null, reqId: string) => {
@@ -546,8 +1160,10 @@ export default function App() {
         }
       })
     );
+    setOpenTabIds((prev) => prev.filter((id) => id !== reqId));
     if (activeRequest?.id === reqId) {
       setActiveRequest(null);
+      clearRequestRuntime();
     }
   };
 
@@ -555,38 +1171,95 @@ export default function App() {
     setCollections([...collections, imported]);
     if (imported.requests.length > 0) {
       setActiveRequest(imported.requests[0]);
+      setOpenTabIds((prev) => [...prev.filter((id) => id !== imported.requests[0].id), imported.requests[0].id].slice(-8));
     } else if (imported.folders.length > 0 && imported.folders[0].requests.length > 0) {
       setActiveRequest(imported.folders[0].requests[0]);
+      setOpenTabIds((prev) => [...prev.filter((id) => id !== imported.folders[0].requests[0].id), imported.folders[0].requests[0].id].slice(-8));
     }
   };
 
+  const searchableRequests = collections.flatMap((collection) => [
+    ...collection.requests.map((request) => ({
+      request,
+      path: collection.name
+    })),
+    ...collection.folders.flatMap((folder) =>
+      folder.requests.map((request) => ({
+        request,
+        path: `${collection.name} / ${folder.name}`
+      }))
+    )
+  ]);
+  const requestMetaById = new Map(searchableRequests.map((item) => [item.request.id, item]));
+  const openTabs = openTabIds
+    .map((tabId) => requestMetaById.get(tabId))
+    .filter((tab): tab is { request: ClotientRequest; path: string } => Boolean(tab));
+
+  const activateRequest = (request: ClotientRequest) => {
+    setActiveRequest(request);
+    setOpenTabIds((prev) => (prev.includes(request.id) ? prev : [...prev, request.id].slice(-8)));
+    clearRequestRuntime();
+  };
+
+  const reorderTabs = (fromId: string, toId: string) => {
+    if (fromId === toId) return;
+    setOpenTabIds((prev) => {
+      const fromIndex = prev.indexOf(fromId);
+      const toIndex = prev.indexOf(toId);
+      if (fromIndex < 0 || toIndex < 0) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return next;
+    });
+  };
+
+  const closeTab = (requestId: string) => {
+    setOpenTabIds((prev) => {
+      const next = prev.filter((id) => id !== requestId);
+      if (activeRequest?.id === requestId) {
+        const nextActiveId = next[0];
+        const nextActive = nextActiveId ? requestMetaById.get(nextActiveId)?.request || null : null;
+        setActiveRequest(nextActive);
+        clearRequestRuntime();
+      }
+      return next;
+    });
+  };
+
+  const globalResults = globalSearch.trim()
+    ? searchableRequests
+        .filter(({ request, path }) =>
+          `${request.name} ${request.method} ${request.url} ${path}`.toLowerCase().includes(globalSearch.toLowerCase())
+        )
+        .slice(0, 8)
+    : [];
+
   if (loadingApp) {
     return (
-      <div className="flex items-center justify-center h-screen bg-[#0b0f19] text-[#e5e7eb] select-none">
+      <div className="flex items-center justify-center h-screen bg-[#f6f8fb] text-[#172033] select-none">
         <div className="text-center font-sans">
-          <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <h2 className="text-md font-semibold text-gray-300">Initializing Clotient Studio...</h2>
+          <div className="w-10 h-10 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <h2 className="text-md font-semibold text-slate-700">Opening Clotient...</h2>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen bg-[#0b0f19] text-[#e5e7eb] overflow-hidden font-sans">
+    <div className="ct-app">
       {/* Sidebar Panel */}
       <Sidebar
         collections={collections}
         environments={environments}
         history={history}
+        width={sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth}
+        collapsed={sidebarCollapsed}
+        resourceMetrics={resourceMetrics}
+        confirmBeforeDelete={settings.confirmBeforeDelete}
         activeRequest={activeRequest}
         activeEnv={activeEnv}
-        onSelectRequest={(req) => {
-          setActiveRequest(req);
-          setResponse(null);
-          setLogs([]);
-          setAssertions([]);
-          setErrorMsg("");
-        }}
+        onSelectRequest={activateRequest}
         onSelectEnv={setActiveEnv}
         onCreateCollection={handleCreateCollection}
         onCreateFolder={handleCreateFolder}
@@ -596,17 +1269,139 @@ export default function App() {
         onImportCollection={handleImportCollection}
         onUpdateEnvironments={setEnvironments}
         onClearHistory={() => setHistory([])}
+        onStartResize={handleSidebarResize}
+        onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
       />
 
       {/* Main Request Workspace Panel */}
-      <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
+      <div className="ct-main" ref={mainRef}>
+        <header className="ct-topbar">
+          <div className="ct-tab-strip">
+            {openTabs.length > 0 ? (
+              openTabs.map(({ request, path }, index) => (
+                <button
+                  key={`${request.id}-${index}`}
+                  className={`ct-request-tab ${request.id === activeRequest?.id ? "active" : ""} ${draggedTabId === request.id ? "dragging" : ""}`}
+                  title={`${path} · ${request.url}`}
+                  draggable
+                  onDragStart={(event) => {
+                    setDraggedTabId(request.id);
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", request.id);
+                  }}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    const fromId = event.dataTransfer.getData("text/plain") || draggedTabId;
+                    if (fromId) reorderTabs(fromId, request.id);
+                    setDraggedTabId(null);
+                  }}
+                  onDragEnd={() => setDraggedTabId(null)}
+                  onClick={() => activateRequest(request)}
+                >
+                  <span className={`ct-method ${request.method}`}>{request.method}</span>
+                  <span className="truncate">{request.name || request.url}</span>
+                  <span
+                    className="ct-tab-close"
+                    title="Close tab"
+                    draggable={false}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      closeTab(request.id);
+                    }}
+                  >
+                    <X size={13} />
+                  </span>
+                </button>
+              ))
+            ) : (
+              <div className="ct-request-tab text-slate-500">No request selected</div>
+            )}
+            <button
+              className="ct-icon-button"
+              title="Create request in first collection"
+              onClick={() => {
+                const firstCollection = collections[0];
+                if (firstCollection) {
+                  handleCreateRequest(firstCollection.id, null, "New Request");
+                } else {
+                  handleCreateCollection("My API");
+                }
+              }}
+            >
+              <Plus size={16} />
+            </button>
+          </div>
+
+          <div className="ct-top-actions">
+            <div className="ct-search">
+              <Search size={15} className="ct-search-icon" />
+              <input
+                value={globalSearch}
+                onChange={(e) => {
+                  setGlobalSearch(e.target.value);
+                  setShowGlobalSearch(true);
+                }}
+                onFocus={() => setShowGlobalSearch(true)}
+                onBlur={() => setTimeout(() => setShowGlobalSearch(false), 160)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && globalResults[0]) {
+                    activateRequest(globalResults[0].request);
+                    setGlobalSearch("");
+                    setShowGlobalSearch(false);
+                  }
+                }}
+                placeholder="Search requests"
+              />
+              <span className="ct-kbd">Ctrl K</span>
+              {showGlobalSearch && globalResults.length > 0 && (
+                <div className="ct-search-popover">
+                  {globalResults.map(({ request, path }) => (
+                    <button
+                      key={request.id}
+                      className="ct-search-result"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        activateRequest(request);
+                        setGlobalSearch("");
+                        setShowGlobalSearch(false);
+                      }}
+                    >
+                      <span className={`ct-method ${request.method}`}>{request.method}</span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate font-semibold">{request.name}</span>
+                        <span className="block truncate text-[11px] text-slate-500">{path}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button className="ct-badge ct-link-badge" onClick={handleOpenRepository} title="Open Clotient repository">
+              <Code2 size={15} />
+              Open Source
+            </button>
+            <button className="ct-icon-button" title="Local settings" onClick={() => setShowSettingsModal(true)}>
+              <Settings size={16} />
+            </button>
+          </div>
+        </header>
+
+        <div className="ct-content">
+        <div className="ct-workspace" style={{ gridTemplateColumns: `minmax(0, 1fr) ${responseCollapsed ? RESPONSE_COLLAPSED_WIDTH : responseWidth}px` }}>
         {activeRequest ? (
-          <div className="flex-1 flex flex-col min-h-0 overflow-hidden divide-y divide-gray-800">
+          <>
             {/* Upper: Request Builder */}
-            <div className="flex-[6] min-h-0 flex flex-col">
+            <div className="ct-builder-pane">
               <RequestBuilder
                 request={activeRequest}
                 onChange={handleActiveRequestChange}
+                onSave={handleManualSave}
+                saveStatus={saveNotice.type}
+                saveMessage={saveNotice.detail ? `${saveNotice.message}: ${saveNotice.detail}` : saveNotice.message}
                 onSend={handleSendRequest}
                 onGenerateCode={() => setShowCodeGenModal(true)}
                 loading={loadingRequest}
@@ -616,34 +1411,73 @@ export default function App() {
               />
             </div>
 
-            {/* Lower: Response Viewer */}
-            <div className="flex-[4] min-h-0 flex flex-col">
-              <ResponseViewer
-                response={response}
-                loading={loadingRequest}
-                logs={logs}
-                assertions={assertions}
-                errorMsg={errorMsg}
-              />
+            {/* Right: Response Viewer */}
+            <div className={`ct-response-pane ${responseCollapsed ? "collapsed" : ""}`}>
+              {responseCollapsed ? (
+                <div className="ct-response-rail">
+                  <button className="ct-side-collapse-button" title="Expand response panel" onClick={() => setResponseCollapsed(false)}>
+                    <ChevronLeft size={16} />
+                  </button>
+                  <span>Response</span>
+                </div>
+              ) : (
+                <>
+                  <div className="ct-resize-handle ct-response-resize" onMouseDown={handleResponseResize} title="Resize response panel" />
+                  <button className="ct-response-collapse-button" title="Collapse response panel" onClick={() => setResponseCollapsed(true)}>
+                    <ChevronRight size={16} />
+                  </button>
+                  <ResponseViewer
+                    response={response}
+                    loading={loadingRequest}
+                    logs={logs}
+                    assertions={assertions}
+                    errorMsg={errorMsg}
+                    compact={settings.compactResponse}
+                  />
+                </>
+              )}
             </div>
-          </div>
+          </>
         ) : (
-          <div className="flex-1 flex flex-col items-center justify-center text-gray-500 bg-gray-950/10 select-none p-6 animate-in fade-in duration-300">
-            <div className="w-16 h-16 mb-4 rounded-xl bg-gray-950/40 p-2 border border-gray-800 shadow-xl flex items-center justify-center">
-              <img src="/logo.png" className="w-12 h-12 rounded-lg" alt="Clotient Logo" />
-            </div>
-            <h3 className="text-sm font-semibold text-gray-300 mb-1.5 tracking-wide">Clotient Studio</h3>
-            <p className="text-xs text-gray-500 max-w-sm text-center leading-relaxed mb-6">
-              A local-first, lightweight REST client. Create or select a request from the sidebar to begin.
-            </p>
-            <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-[11px] border-t border-gray-900/60 pt-6 w-full max-w-xs text-gray-400">
-              <div className="flex justify-between gap-4"><span className="text-gray-500">Create Request</span><kbd className="bg-gray-850 px-1.5 py-0.5 rounded text-[10px] text-gray-300 font-semibold border border-gray-800">Ctrl + N</kbd></div>
-              <div className="flex justify-between gap-4"><span className="text-gray-500">Send Request</span><kbd className="bg-gray-850 px-1.5 py-0.5 rounded text-[10px] text-gray-300 font-semibold border border-gray-800">Ctrl + Enter</kbd></div>
-              <div className="flex justify-between gap-4"><span className="text-gray-500">Import Collection</span><kbd className="bg-gray-850 px-1.5 py-0.5 rounded text-[10px] text-gray-300 font-semibold border border-gray-800">Ctrl + I</kbd></div>
-              <div className="flex justify-between gap-4"><span className="text-gray-500">Close Tabs</span><kbd className="bg-gray-850 px-1.5 py-0.5 rounded text-[10px] text-gray-300 font-semibold border border-gray-800">Esc</kbd></div>
+          <div className="ct-empty">
+            <div className="ct-empty-card">
+              <div className="w-14 h-14 mx-auto mb-4 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center">
+                <img src="/logo.png" className="w-10 h-10 rounded-lg" alt="Clotient Logo" />
+              </div>
+              <h3 className="text-base font-semibold text-slate-900 mb-1">Clotient</h3>
+              <p className="text-sm text-slate-500 leading-relaxed mb-6">
+                A lightweight, local-first open-source API client. Create or select a request from the sidebar to begin.
+              </p>
+              <button
+                className="ct-primary h-10 px-4"
+                onClick={() => {
+                  const firstCollection = collections[0];
+                  if (firstCollection) handleCreateRequest(firstCollection.id, null, "New Request");
+                  else handleCreateCollection("My API");
+                }}
+              >
+                New request
+              </button>
             </div>
           </div>
         )}
+        </div>
+        <BottomConsole
+          response={response}
+          logs={logs}
+          assertions={assertions}
+          history={history}
+          errorMsg={errorMsg}
+          loading={loadingRequest}
+          height={consoleHeight}
+          onStartResize={handleConsoleResize}
+          onClearLogs={() => {
+            setLogs([]);
+            setAssertions([]);
+            setErrorMsg("");
+          }}
+        />
+        </div>
       </div>
 
       {/* Code Snippets Modal */}
@@ -655,20 +1489,44 @@ export default function App() {
         />
       )}
 
+      {showSettingsModal && (
+        <SettingsModal
+          settings={settings}
+          metrics={resourceMetrics}
+          saveNotice={saveNotice}
+          onChange={setSettings}
+          onSave={handleManualSave}
+          onResetLayout={handleResetLayout}
+          onClearRuntimeCache={handleClearRuntimeCache}
+          onClearLocalStorage={handleClearLocalStorage}
+          onClose={() => setShowSettingsModal(false)}
+        />
+      )}
+
+      {saveToast && (
+        <div className={`ct-save-toast ${saveToast.type}`}>
+          {saveToast.type === "error" ? <AlertCircle size={17} /> : <CheckCircle2 size={17} />}
+          <div>
+            <strong>{saveToast.message}</strong>
+            {saveToast.detail && <span>{saveToast.detail}</span>}
+          </div>
+        </div>
+      )}
+
       {/* Custom dialog prompt overlay modal */}
       {promptOpen && promptConfig && (
-        <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-gray-900 border border-gray-800 rounded-lg w-full max-w-sm overflow-hidden text-sm shadow-2xl animate-in fade-in duration-200">
-            <div className="p-4 bg-[#0e1322] border-b border-gray-850 flex justify-between items-center select-none">
-              <h4 className="text-gray-100 font-semibold">{promptConfig.title}</h4>
-              <button onClick={() => setPromptOpen(false)} className="text-gray-400 hover:text-white cursor-pointer">✕</button>
+        <div className="ct-modal-backdrop">
+          <div className="ct-modal max-w-sm">
+            <div className="p-4 border-b border-slate-200 flex justify-between items-center select-none">
+              <h4 className="text-slate-900 font-semibold">{promptConfig.title}</h4>
+              <button onClick={() => setPromptOpen(false)} className="text-slate-400 hover:text-slate-900 cursor-pointer">✕</button>
             </div>
             <div className="p-4 space-y-3">
-              <p className="text-xs text-gray-400 leading-relaxed select-text">{promptConfig.message}</p>
+              <p className="text-xs text-slate-500 leading-relaxed select-text">{promptConfig.message}</p>
               <input
                 type="text"
                 id="app-prompt-input"
-                className="w-full bg-[#0e1322] border border-gray-850 rounded px-3 py-2 text-xs outline-none text-gray-250 focus:border-indigo-500 font-medium"
+                className="w-full bg-white border border-slate-200 rounded-md px-3 py-2 text-xs outline-none text-slate-800 focus:border-blue-500 font-medium"
                 placeholder={promptConfig.placeholder}
                 defaultValue={promptConfig.defaultValue}
                 autoFocus
@@ -682,10 +1540,10 @@ export default function App() {
                 }}
               />
             </div>
-            <div className="px-4 py-3 bg-[#0e1322] border-t border-gray-800 flex justify-end gap-2.5 select-none">
+            <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end gap-2.5 select-none">
               <button
                 onClick={() => setPromptOpen(false)}
-                className="px-3.5 py-1.5 border border-gray-705 hover:bg-gray-800 text-gray-300 rounded text-xs transition cursor-pointer"
+                className="ct-secondary px-3.5 py-1.5 text-xs"
               >
                 Cancel
               </button>
@@ -694,7 +1552,7 @@ export default function App() {
                   const val = (document.getElementById("app-prompt-input") as HTMLInputElement)?.value || "";
                   promptConfig.onConfirm(val);
                 }}
-                className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs transition font-semibold cursor-pointer"
+                className="ct-primary px-3.5 py-1.5 text-xs"
               >
                 Confirm
               </button>
@@ -702,6 +1560,321 @@ export default function App() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function BottomConsole({
+  response,
+  logs,
+  assertions,
+  history,
+  errorMsg,
+  loading,
+  height,
+  onStartResize,
+  onClearLogs
+}: {
+  response: HttpResponsePayload | null;
+  logs: string[];
+  assertions: { passed: boolean; message: string }[];
+  history: HistoryItem[];
+  errorMsg: string;
+  loading: boolean;
+  height: number;
+  onStartResize: (event: ReactMouseEvent<HTMLDivElement>) => void;
+  onClearLogs: () => void;
+}) {
+  const [activeTab, setActiveTab] = useState<"console" | "logs">("console");
+  const [level, setLevel] = useState<"all" | "info" | "success" | "error" | "test">("all");
+  const [collapsed, setCollapsed] = useState(false);
+  const latest = history[0];
+  const now = new Date().toLocaleTimeString();
+
+  const consoleRows: ConsoleRow[] = [
+    latest
+      ? {
+          time: new Date(latest.timestamp).toLocaleTimeString(),
+          event: `${latest.method} ${latest.url}`,
+          meta: latest.response ? `${latest.response.status} · ${latest.response.timeMs} ms` : "Sent",
+          level: latest.response && latest.response.status >= 400 ? "error" : "success"
+        }
+      : {
+          time: "--:--:--",
+          event: "Console ready",
+          meta: "Local workspace",
+          level: "info"
+        },
+    loading
+      ? {
+          time: now,
+          event: "Request in progress",
+          meta: "Waiting",
+          level: "info"
+        }
+      : errorMsg
+        ? {
+            time: now,
+            event: "Request failed",
+            meta: errorMsg,
+            level: "error"
+          }
+        : null,
+    response
+      ? {
+          time: now,
+          event: "Response received",
+          meta: `${response.timeMs} ms · ${formatBytes(response.sizeBytes)}`,
+          level: response.status >= 400 ? "error" : "success"
+        }
+      : {
+          time: "--:--:--",
+          event: "Response pending",
+          meta: "Send a request",
+          level: "info"
+        },
+    {
+      time: now,
+      event: logs.length > 0 ? `${logs.length} console log${logs.length === 1 ? "" : "s"}` : "Console empty",
+      meta: assertions.length > 0 ? `${assertions.filter((a) => a.passed).length}/${assertions.length} tests` : "No tests",
+      level: assertions.some((assertion) => !assertion.passed) ? "error" : assertions.length > 0 ? "test" : "info"
+    }
+  ].filter(Boolean) as ConsoleRow[];
+
+  const logRows: ConsoleRow[] = [
+    ...logs.map((log, index) => ({
+      time: now,
+      event: log,
+      meta: `log ${index + 1}`,
+      level: log.toLowerCase().includes("error") || log.toLowerCase().includes("failed") ? "error" : "info"
+    } satisfies ConsoleRow)),
+    ...assertions.map((assertion, index) => ({
+      time: now,
+      event: assertion.message,
+      meta: `test ${index + 1}`,
+      level: assertion.passed ? "test" : "error"
+    } satisfies ConsoleRow)),
+    ...(errorMsg
+      ? [{
+          time: now,
+          event: errorMsg,
+          meta: "error",
+          level: "error"
+        } satisfies ConsoleRow]
+      : []),
+    ...history.slice(0, 10).map((item) => ({
+      time: new Date(item.timestamp).toLocaleTimeString(),
+      event: `${item.method} ${item.url}`,
+      meta: item.response ? `${item.response.status} · ${item.response.timeMs} ms` : "sent",
+      level: item.response && item.response.status >= 400 ? "error" : "success"
+    } satisfies ConsoleRow))
+  ];
+
+  const activeRows = activeTab === "console" ? consoleRows : logRows;
+  const visibleRows = level === "all" ? activeRows : activeRows.filter((row) => row.level === level);
+
+  return (
+    <div className={`ct-console ${collapsed ? "collapsed" : ""}`} style={{ height: collapsed ? 38 : height }}>
+      {!collapsed && <div className="ct-resize-handle ct-console-resize" onMouseDown={onStartResize} title="Resize console" />}
+      <div className="ct-console-head">
+        <div className="flex items-center gap-4">
+          <button className={activeTab === "console" ? "active" : ""} onClick={() => setActiveTab("console")}>Console</button>
+          <button className={activeTab === "logs" ? "active" : ""} onClick={() => setActiveTab("logs")}>Logs</button>
+        </div>
+        <div className="ct-console-actions">
+          <label>
+            <span>Level</span>
+            <select value={level} onChange={(event) => setLevel(event.target.value as typeof level)}>
+              <option value="all">All Levels</option>
+              <option value="info">Info</option>
+              <option value="success">Success</option>
+              <option value="error">Error</option>
+              <option value="test">Tests</option>
+            </select>
+          </label>
+          <button className="ct-console-icon" onClick={onClearLogs} title="Clear current logs">
+            <Trash2 size={14} />
+          </button>
+          <button
+            className="ct-console-icon"
+            onClick={() => setCollapsed((value) => !value)}
+            title={collapsed ? "Expand console" : "Collapse console"}
+          >
+            {collapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          </button>
+        </div>
+      </div>
+      {!collapsed && <div className="ct-console-body">
+        {visibleRows.length === 0 ? (
+          <div className="ct-console-empty">No {activeTab === "logs" ? "logs" : "console events"} for this filter.</div>
+        ) : visibleRows.map((row, index) => (
+          <div key={`${row.time}-${row.event}-${index}`} className={`ct-console-row ${row.level}`}>
+            <span>{row.time}</span>
+            <strong>{row.event}</strong>
+            <em>{row.meta}</em>
+          </div>
+        ))}
+      </div>}
+    </div>
+  );
+}
+
+type ConsoleRow = {
+  time: string;
+  event: string;
+  meta: string;
+  level: "info" | "success" | "error" | "test";
+};
+
+function SettingsModal({
+  settings,
+  metrics,
+  saveNotice,
+  onChange,
+  onSave,
+  onResetLayout,
+  onClearRuntimeCache,
+  onClearLocalStorage,
+  onClose
+}: {
+  settings: AppSettings;
+  metrics: ResourceMetrics;
+  saveNotice: SaveNotice;
+  onChange: (settings: AppSettings) => void;
+  onSave: () => void;
+  onResetLayout: () => void;
+  onClearRuntimeCache: () => void;
+  onClearLocalStorage: () => void;
+  onClose: () => void;
+}) {
+  const update = (fields: Partial<AppSettings>) => onChange({ ...settings, ...fields });
+
+  return (
+    <div className="ct-modal-backdrop">
+      <div className="ct-modal ct-settings-modal">
+        <div className="h-14 px-5 border-b border-slate-200 flex items-center justify-between bg-white">
+          <div className="flex items-center gap-2">
+            <Settings size={18} className="text-blue-600" />
+            <h3 className="font-semibold text-slate-900">Settings</h3>
+          </div>
+          <button className="ct-icon-button !h-8 !w-8" onClick={onClose}>✕</button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-5 bg-slate-50/70 space-y-4">
+          <div className="ct-panel p-4">
+            <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <CheckCircle2 size={16} className="text-emerald-600" />
+              Save behavior
+            </div>
+            <SettingRow
+              title="Auto-save"
+              detail="Collections, environments, history, and settings save automatically."
+              control={
+                <input
+                  type="checkbox"
+                  checked={settings.autoSave}
+                  onChange={(event) => update({ autoSave: event.target.checked })}
+                />
+              }
+            />
+            <SettingRow
+              title="Request timeout"
+              detail="Used by the request runner before cancelling a slow request."
+              control={
+                <input
+                  type="number"
+                  min={1000}
+                  max={120000}
+                  step={1000}
+                  value={settings.requestTimeoutMs}
+                  onChange={(event) => update({ requestTimeoutMs: clamp(Number(event.target.value) || 30000, 1000, 120000) })}
+                  className="ct-settings-number"
+                />
+              }
+            />
+            <div className={`ct-save-state ${saveNotice.type}`}>
+              {saveNotice.type === "error" ? <AlertCircle size={15} /> : <CheckCircle2 size={15} />}
+              <span>{saveNotice.detail ? `${saveNotice.message}: ${saveNotice.detail}` : saveNotice.message}</span>
+            </div>
+          </div>
+
+          <div className="ct-panel p-4">
+            <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-900">
+              <Database size={16} className="text-blue-600" />
+              Interface and data
+            </div>
+            <SettingRow
+              title="Compact response viewer"
+              detail="Reduce padding in the response panel for more visible response content."
+              control={
+                <input
+                  type="checkbox"
+                  checked={settings.compactResponse}
+                  onChange={(event) => update({ compactResponse: event.target.checked })}
+                />
+              }
+            />
+            <SettingRow
+              title="Confirm before delete"
+              detail="Ask before removing collections or requests from the sidebar."
+              control={
+                <input
+                  type="checkbox"
+                  checked={settings.confirmBeforeDelete}
+                  onChange={(event) => update({ confirmBeforeDelete: event.target.checked })}
+                />
+              }
+            />
+            <div className="ct-settings-actions">
+              <button className="ct-secondary h-9 px-3 flex items-center gap-2" onClick={onResetLayout}>
+                <RotateCcw size={15} /> Reset layout
+              </button>
+              <button className="ct-secondary h-9 px-3 flex items-center gap-2" onClick={onClearRuntimeCache}>
+                <Trash2 size={15} /> Clear runtime cache
+              </button>
+              <button className="ct-danger h-9 px-3 flex items-center gap-2" onClick={onClearLocalStorage}>
+                <Trash2 size={15} /> Clear local storage
+              </button>
+            </div>
+          </div>
+
+          <div className="ct-panel p-4">
+            <div className="mb-3 text-sm font-semibold text-slate-900">Current footprint</div>
+            <div className="ct-settings-metrics">
+              <MetricPillCompact label="Memory" value={metrics.memory} />
+              <MetricPillCompact label="Load" value={metrics.load} />
+              <MetricPillCompact label="Storage" value={metrics.storage} />
+              <MetricPillCompact label="Delta" value={metrics.delta} />
+            </div>
+          </div>
+        </div>
+
+        <div className="px-5 py-4 border-t border-slate-200 bg-white flex justify-end gap-2">
+          <button className="ct-secondary h-9 px-4" onClick={onSave}>Save now</button>
+          <button className="ct-primary h-9 px-4" onClick={onClose}>Done</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingRow({ title, detail, control }: { title: string; detail: string; control: React.ReactNode }) {
+  return (
+    <div className="ct-setting-row">
+      <div className="min-w-0">
+        <div className="text-sm font-semibold text-slate-800">{title}</div>
+        <div className="text-xs text-slate-500 leading-relaxed">{detail}</div>
+      </div>
+      {control}
+    </div>
+  );
+}
+
+function MetricPillCompact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="ct-settings-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
     </div>
   );
 }
