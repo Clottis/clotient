@@ -1,18 +1,16 @@
-import { useState, useEffect, useRef } from "react";
-import { 
-  Folder, 
-  Plus, 
-  Trash2, 
-  Import, 
-  Download, 
-  Settings, 
-  Globe, 
-  Search,
+import { useEffect, useState } from "react";
+import type { MouseEvent } from "react";
+import {
   ChevronDown,
   ChevronRight,
-  Eye
+  Download,
+  Folder,
+  Globe2,
+  MoreHorizontal,
+  Plus,
+  Trash2
 } from "lucide-react";
-import { ClotientCollection, ClotientRequest, Environment, HistoryItem } from "../types";
+import { ClotientCollection, ClotientRequest, Environment, HistoryItem, KeyValue } from "../types";
 import { importPostmanCollection, exportToPostmanCollection } from "../utils/postmanParser";
 import packageJson from "../../package.json";
 
@@ -20,6 +18,9 @@ interface SidebarProps {
   collections: ClotientCollection[];
   environments: Environment[];
   history: HistoryItem[];
+  width: number;
+  resourceMetrics: ResourceMetrics;
+  confirmBeforeDelete: boolean;
   activeRequest: ClotientRequest | null;
   activeEnv: Environment | null;
   onSelectRequest: (req: ClotientRequest) => void;
@@ -32,12 +33,38 @@ interface SidebarProps {
   onImportCollection: (collection: ClotientCollection) => void;
   onUpdateEnvironments: (envs: Environment[]) => void;
   onClearHistory: () => void;
+  onStartResize: (event: MouseEvent<HTMLDivElement>) => void;
+}
+
+export interface ResourceMetrics {
+  memory: string;
+  storage: string;
+  load: string;
+  delta: string;
+  live: boolean;
+}
+
+const id = () => Math.random().toString(36).substring(2, 11);
+
+function methodClass(method: string) {
+  return `ct-method ${method}`;
+}
+
+function formatTime(timestamp: number) {
+  const minutes = Math.max(1, Math.floor((Date.now() - timestamp) / 60000));
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(timestamp).toLocaleDateString();
 }
 
 export default function Sidebar({
   collections,
   environments,
   history,
+  width,
+  resourceMetrics,
+  confirmBeforeDelete,
   activeRequest,
   activeEnv,
   onSelectRequest,
@@ -49,953 +76,496 @@ export default function Sidebar({
   onDeleteCollection,
   onImportCollection,
   onUpdateEnvironments,
-  onClearHistory
+  onClearHistory,
+  onStartResize
 }: SidebarProps) {
-  const [activeTab, setActiveTab] = useState<"collections" | "history">("collections");
-  const [searchTerm, setSearchTerm] = useState("");
-  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [showEnvModal, setShowEnvModal] = useState(false);
-  const [showQuickLook, setShowQuickLook] = useState(false);
-
-  // Custom environment dropdown states
-  const [showEnvDropdown, setShowEnvDropdown] = useState(false);
-  const envDropdownRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (envDropdownRef.current && !envDropdownRef.current.contains(event.target as Node)) {
-        setShowEnvDropdown(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
-  }, []);
-
-  // For inline creates
-  const [showNewCollection, setShowNewCollection] = useState(false);
-  const [newCollName, setNewCollName] = useState("");
-
-  // Custom Modal dialog states
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [dialogConfig, setDialogConfig] = useState<{
-    type: "prompt" | "confirm";
+  const [dialog, setDialog] = useState<{
     title: string;
     message?: string;
     placeholder?: string;
     defaultValue?: string;
-    onConfirm: (val?: string) => void;
+    danger?: boolean;
+    onConfirm: (value?: string) => void;
   } | null>(null);
 
-  const showCustomPrompt = (title: string, placeholder: string, defaultValue: string, onConfirm: (val: string) => void) => {
-    setDialogConfig({
-      type: "prompt",
+  useEffect(() => {
+    setExpanded((prev) => {
+      const next = { ...prev };
+      collections.forEach((collection) => {
+        if (next[collection.id] === undefined) next[collection.id] = true;
+        collection.folders.forEach((folder) => {
+          if (next[folder.id] === undefined) next[folder.id] = false;
+        });
+      });
+      return next;
+    });
+  }, [collections]);
+
+  const showPrompt = (title: string, placeholder: string, defaultValue: string, onConfirm: (value: string) => void) => {
+    setDialog({
       title,
       placeholder,
       defaultValue,
-      onConfirm: (val) => {
-        if (val !== undefined && val.trim()) {
-          onConfirm(val.trim());
-        }
-        setDialogOpen(false);
+      onConfirm: (value) => {
+        if (value?.trim()) onConfirm(value.trim());
+        setDialog(null);
       }
     });
-    setDialogOpen(true);
   };
 
-  const showCustomConfirm = (title: string, message: string, onConfirm: () => void) => {
-    setDialogConfig({
-      type: "confirm",
+  const showConfirm = (title: string, message: string, onConfirm: () => void) => {
+    if (!confirmBeforeDelete) {
+      onConfirm();
+      return;
+    }
+    setDialog({
       title,
       message,
+      danger: true,
       onConfirm: () => {
         onConfirm();
-        setDialogOpen(false);
+        setDialog(null);
       }
     });
-    setDialogOpen(true);
-  };
-
-  const toggleFolder = (id: string) => {
-    setExpandedFolders((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
   const handleImportClick = () => {
     const input = document.createElement("input");
     input.type = "file";
     input.accept = ".json";
-    input.onchange = async (e: any) => {
-      const file = e.target.files?.[0];
+    input.onchange = async (event: any) => {
+      const file = event.target.files?.[0];
       if (!file) return;
       try {
-        const text = await file.text();
-        const col = importPostmanCollection(text);
-        onImportCollection(col);
+        onImportCollection(importPostmanCollection(await file.text()));
       } catch (err: any) {
-        showCustomConfirm("Import Error", "Failed to parse Postman collection: " + err.message, () => {});
+        showConfirm("Import failed", err.message || "Could not parse the selected Postman collection.", () => {});
       }
     };
     input.click();
   };
 
   const handleExport = (collection: ClotientCollection) => {
-    try {
-      const pmJson = exportToPostmanCollection(collection);
-      const blob = new Blob([JSON.stringify(pmJson, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${collection.name}.postman_collection.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (err: any) {
-      showCustomConfirm("Export Error", "Failed to export: " + err.message, () => {});
-    }
+    const postmanJson = exportToPostmanCollection(collection);
+    const blob = new Blob([JSON.stringify(postmanJson, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${collection.name}.postman_collection.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
-    <div className="w-80 border-r border-gray-800 bg-gray-900 flex flex-col h-full text-sm select-none relative">
-      {/* Brand Header */}
-      <div className="p-4 border-b border-gray-850 bg-gray-950/20 flex items-center gap-2.5 select-none shrink-0">
-        <img src="/logo.png" className="w-6 h-6 rounded" alt="Clotient Logo" />
-        <span className="font-bold text-xs text-gray-100 tracking-wider">CLOTIENT</span>
-        <span className="text-[9px] text-cyan-400 font-bold bg-cyan-950/40 border border-cyan-800/30 px-1.5 py-0.5 rounded ml-auto">STUDIO</span>
+    <aside className="ct-sidebar shrink-0 h-full bg-white border-r border-slate-200 flex flex-col select-none" style={{ width }}>
+      <div className="h-[76px] px-5 border-b border-slate-200 flex items-center gap-3">
+        <img src="/logo.png" className="w-8 h-8 rounded-lg" alt="Clotient" />
+        <div className="min-w-0">
+          <div className="text-[22px] font-semibold tracking-tight text-slate-950 leading-none">Clotient</div>
+        </div>
       </div>
 
-      {/* Upper Area: Environment Selection */}
-      <div className="p-4 border-b border-gray-800 flex items-center justify-between gap-2 relative">
-        <div className="flex items-center gap-2 text-gray-400 w-full">
-          <Globe className="w-4 h-4 text-cyan-400 shrink-0" />
-          <div className="relative flex-1" ref={envDropdownRef}>
-            <button
-              onClick={() => setShowEnvDropdown(!showEnvDropdown)}
-              className="bg-gray-800 text-gray-200 border border-gray-700 rounded pl-2.5 pr-8 py-1.5 w-full text-xs outline-none text-left flex items-center justify-between hover:bg-gray-750 transition cursor-pointer relative"
-            >
-              <span className="truncate">{activeEnv?.name || "No Environment"}</span>
-              <ChevronDown className="w-3.5 h-3.5 text-gray-500 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-            </button>
-            
-            {showEnvDropdown && (
-              <div className="absolute top-full left-0 right-0 z-50 mt-1 bg-[#0e1322] border border-gray-800 rounded shadow-2xl py-1 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-100">
-                <div
-                  className={`px-3 py-1.5 text-xs cursor-pointer transition select-none ${
-                    !activeEnv
-                      ? "bg-indigo-950/40 text-indigo-400 font-bold"
-                      : "text-gray-400 hover:bg-gray-900 hover:text-gray-200"
-                  }`}
-                  onClick={() => {
-                    onSelectEnv(null);
-                    setShowEnvDropdown(false);
-                  }}
-                >
-                  No Environment
-                </div>
-                {environments.map((env) => (
-                  <div
-                    key={env.id}
-                    className={`px-3 py-1.5 text-xs cursor-pointer transition select-none truncate ${
-                      activeEnv?.id === env.id
-                        ? "bg-indigo-950/40 text-indigo-400 font-bold"
-                        : "text-gray-400 hover:bg-gray-900 hover:text-gray-200"
-                    }`}
-                    onClick={() => {
-                      onSelectEnv(env);
-                      setShowEnvDropdown(false);
-                    }}
-                  >
-                    {env.name}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {activeEnv && (
-          <button
-            className={`p-1.5 rounded border transition cursor-pointer ${
-              showQuickLook
-                ? "bg-indigo-950 text-indigo-400 border-indigo-550/40"
-                : "bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white border-gray-700"
-            }`}
-            title="Environment Quick Look"
-            onClick={() => setShowQuickLook(!showQuickLook)}
-          >
-            <Eye className="w-4 h-4" />
+      <div className="h-[94px] px-5 py-4 border-b border-slate-200">
+        <div className="mb-3 flex items-center justify-between">
+          <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Workspace</span>
+          <button className="ct-icon-button !h-8 !w-8" onClick={() => showPrompt("New collection", "Collection name", "New Collection", onCreateCollection)}>
+            <Plus size={16} />
           </button>
-        )}
-
-        <button
-          className="p-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white rounded border border-gray-700 transition cursor-pointer"
-          title="Manage Environments"
-          onClick={() => setShowEnvModal(true)}
-        >
-          <Settings className="w-4 h-4" />
+        </div>
+        <button className="w-full h-9 rounded-md flex items-center gap-3 text-sm font-semibold text-slate-800 hover:bg-slate-50">
+          <span className="h-2 w-2 rounded-full bg-emerald-500" />
+          <span className="flex-1 text-left truncate">{activeEnv?.name || "Local"}</span>
+          <ChevronDown size={15} className="text-slate-400" />
         </button>
+      </div>
 
-        {/* Quick Look Popover */}
-        {showQuickLook && activeEnv && (
-          <div className="absolute top-full left-4 right-4 z-40 mt-1 bg-gray-950 border border-gray-800 rounded-lg shadow-2xl p-3 flex flex-col gap-2 max-h-64 overflow-y-auto animate-in fade-in duration-150">
-            <div className="flex items-center justify-between border-b border-gray-850 pb-1.5">
-              <span className="text-[10px] text-gray-500 uppercase font-bold tracking-wider">Active Variables</span>
-              <button
-                className="text-[10px] text-indigo-400 hover:text-indigo-350 font-bold cursor-pointer"
-                onClick={() => {
-                  const newVar = {
-                    id: Math.random().toString(36).substring(2, 11),
-                    key: "new_variable",
-                    value: "value",
-                    enabled: true
-                  };
-                  const updatedVars = [...activeEnv.variables, newVar];
-                  const updatedEnvs = environments.map((e) => (e.id === activeEnv.id ? { ...e, variables: updatedVars } : e));
-                  onUpdateEnvironments(updatedEnvs);
-                  onSelectEnv({ ...activeEnv, variables: updatedVars });
-                }}
-              >
-                + Add Key
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        <Section
+          title="Collections"
+          right={
+            <div className="flex items-center gap-2">
+              <button className="text-slate-400 hover:text-blue-600" onClick={() => showPrompt("New collection", "Collection name", "New Collection", onCreateCollection)}>
+                <Plus size={15} />
+              </button>
+              <button className="text-slate-400 hover:text-blue-600" onClick={handleImportClick}>
+                <MoreHorizontal size={16} />
               </button>
             </div>
-            <div className="space-y-1.5">
-              {activeEnv.variables.map((v) => (
-                <div key={v.id} className="flex items-center gap-1.5">
-                  <input
-                    type="checkbox"
-                    checked={v.enabled}
-                    onChange={(e) => {
-                      const updatedVars = activeEnv.variables.map((x) => (x.id === v.id ? { ...x, enabled: e.target.checked } : x));
-                      const updatedEnvs = environments.map((e) => (e.id === activeEnv.id ? { ...e, variables: updatedVars } : e));
-                      onUpdateEnvironments(updatedEnvs);
-                      onSelectEnv({ ...activeEnv, variables: updatedVars });
-                    }}
-                    className="accent-indigo-500 cursor-pointer"
-                  />
-                  <input
-                    type="text"
-                    value={v.key}
-                    placeholder="Key"
-                    onChange={(e) => {
-                      const updatedVars = activeEnv.variables.map((x) => (x.id === v.id ? { ...x, key: e.target.value } : x));
-                      const updatedEnvs = environments.map((e) => (e.id === activeEnv.id ? { ...e, variables: updatedVars } : e));
-                      onUpdateEnvironments(updatedEnvs);
-                      onSelectEnv({ ...activeEnv, variables: updatedVars });
-                    }}
-                    className="bg-transparent border-b border-transparent focus:border-gray-800 text-gray-250 text-xs w-1/2 outline-none font-mono py-0.5"
-                  />
-                  <input
-                    type="text"
-                    value={v.value}
-                    placeholder="Value"
-                    onChange={(e) => {
-                      const updatedVars = activeEnv.variables.map((x) => (x.id === v.id ? { ...x, value: e.target.value } : x));
-                      const updatedEnvs = environments.map((e) => (e.id === activeEnv.id ? { ...e, variables: updatedVars } : e));
-                      onUpdateEnvironments(updatedEnvs);
-                      onSelectEnv({ ...activeEnv, variables: updatedVars });
-                    }}
-                    className="bg-transparent border-b border-transparent focus:border-gray-800 text-gray-400 text-xs w-1/2 outline-none font-mono py-0.5"
-                  />
-                  <button
-                    className="text-gray-600 hover:text-red-400 transition cursor-pointer"
-                    onClick={() => {
-                      const updatedVars = activeEnv.variables.filter((x) => x.id !== v.id);
-                      const updatedEnvs = environments.map((e) => (e.id === activeEnv.id ? { ...e, variables: updatedVars } : e));
-                      onUpdateEnvironments(updatedEnvs);
-                      onSelectEnv({ ...activeEnv, variables: updatedVars });
-                    }}
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
+          }
+        >
+          {collections.map((collection) => (
+            <div key={collection.id} className="mb-1">
+              <div className="group h-8 px-2 rounded-md flex items-center gap-2 hover:bg-slate-50">
+                <button className="text-slate-500" onClick={() => setExpanded((prev) => ({ ...prev, [collection.id]: !prev[collection.id] }))}>
+                  {expanded[collection.id] ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                </button>
+                <Folder size={16} className="text-slate-600" />
+                <span className="flex-1 truncate text-sm font-semibold text-slate-800">{collection.name}</span>
+                <div className="hidden group-hover:flex items-center gap-1">
+                  <button className="text-slate-400 hover:text-blue-600" title="New request" onClick={() => showPrompt("New request", "Request name", "/v1/users", (value) => onCreateRequest(collection.id, null, value))}>
+                    <Plus size={14} />
+                  </button>
+                  <button className="text-slate-400 hover:text-blue-600" title="New folder" onClick={() => showPrompt("New folder", "Folder name", "New Folder", (value) => onCreateFolder(collection.id, value))}>
+                    <Folder size={14} />
+                  </button>
+                  <button className="text-slate-400 hover:text-blue-600" title="Export" onClick={() => handleExport(collection)}>
+                    <Download size={14} />
+                  </button>
+                  <button className="text-slate-400 hover:text-red-600" title="Delete" onClick={() => showConfirm("Delete collection", `Delete "${collection.name}"?`, () => onDeleteCollection(collection.id))}>
+                    <Trash2 size={14} />
                   </button>
                 </div>
-              ))}
-              {activeEnv.variables.length === 0 && (
-                <div className="text-[10px] text-gray-600 text-center py-2">
-                  No active variables.
+              </div>
+
+              {expanded[collection.id] && (
+                <div className="ml-5 mt-1 space-y-1">
+                  {collection.requests.map((request) => (
+                    <RequestRow
+                      key={request.id}
+                      request={request}
+                      active={activeRequest?.id === request.id}
+                      onSelect={() => onSelectRequest(request)}
+                      onDelete={() => showConfirm("Delete request", `Delete "${request.name}"?`, () => onDeleteRequest(collection.id, null, request.id))}
+                    />
+                  ))}
+                  {collection.folders.map((folder) => (
+                    <div key={folder.id}>
+                      <button
+                        className="w-full h-8 px-1 rounded-md flex items-center gap-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                        onClick={() => setExpanded((prev) => ({ ...prev, [folder.id]: !prev[folder.id] }))}
+                      >
+                        {expanded[folder.id] ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                        <Folder size={16} className="text-slate-600" />
+                        <span className="truncate">{folder.name}</span>
+                      </button>
+                      {expanded[folder.id] && (
+                        <div className="ml-5 space-y-1">
+                          {folder.requests.map((request) => (
+                            <RequestRow
+                              key={request.id}
+                              request={request}
+                              active={activeRequest?.id === request.id}
+                              onSelect={() => onSelectRequest(request)}
+                              onDelete={() => showConfirm("Delete request", `Delete "${request.name}"?`, () => onDeleteRequest(collection.id, folder.id, request.id))}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
-          </div>
-        )}
-      </div>
+          ))}
+        </Section>
 
-      {/* Navigation tabs */}
-      <div className="flex border-b border-gray-800 bg-gray-950">
-        <button
-          className={`flex-1 py-2.5 text-center font-medium border-b-2 transition cursor-pointer ${
-            activeTab === "collections"
-              ? "border-indigo-500 text-indigo-400 bg-gray-900"
-              : "border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-900/50"
-          }`}
-          onClick={() => setActiveTab("collections")}
-        >
-          Collections
-        </button>
-        <button
-          className={`flex-1 py-2.5 text-center font-medium border-b-2 transition cursor-pointer ${
-            activeTab === "history"
-              ? "border-indigo-500 text-indigo-400 bg-gray-900"
-              : "border-transparent text-gray-400 hover:text-gray-200 hover:bg-gray-900/50"
-          }`}
-          onClick={() => {
-            setActiveTab("history");
-            setShowQuickLook(false);
-          }}
-        >
-          History
-        </button>
-      </div>
-
-      {/* Action Header / Search */}
-      <div className="p-3 border-b border-gray-850 bg-gray-950/20 flex flex-col gap-2">
-        <div className="relative">
-          <Search className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            className="w-full bg-gray-800 text-gray-200 pl-8 pr-3 py-1 text-xs rounded border border-gray-700 outline-none focus:border-indigo-550"
-            placeholder={activeTab === "collections" ? "Search collections..." : "Search history..."}
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-          />
-        </div>
-
-        {activeTab === "collections" && (
-          <div className="flex items-center justify-between gap-1 select-none">
-            <button
-              onClick={() => setShowNewCollection(true)}
-              className="flex-1 py-1 px-2 text-[10px] font-bold bg-indigo-950/40 hover:bg-indigo-950 border border-indigo-900/40 text-indigo-300 rounded flex items-center justify-center gap-1 transition cursor-pointer"
-            >
-              <Plus className="w-3 h-3" /> New Coll
+        <Section
+          title="Environments"
+          right={
+            <button className="text-slate-400 hover:text-blue-600" onClick={() => setShowEnvModal(true)}>
+              <Plus size={15} />
             </button>
+          }
+        >
+          {environments.map((environment, index) => (
             <button
-              onClick={handleImportClick}
-              className="flex-1 py-1 px-2 text-[10px] font-bold bg-gray-850 hover:bg-gray-800 border border-gray-700 text-gray-300 rounded flex items-center justify-center gap-1 transition cursor-pointer"
+              key={environment.id}
+              onClick={() => onSelectEnv(environment)}
+              className={`w-full h-8 px-2 rounded-md flex items-center gap-3 text-sm ${
+                activeEnv?.id === environment.id ? "bg-blue-50 text-blue-800" : "text-slate-700 hover:bg-slate-50"
+              }`}
             >
-              <Import className="w-3 h-3" /> Import PM
+              <span className={`h-2 w-2 rounded-full ${["bg-emerald-500", "bg-blue-500", "bg-amber-500", "bg-red-500"][index % 4]}`} />
+              <span className="truncate">{environment.name}</span>
             </button>
-          </div>
-        )}
+          ))}
+        </Section>
+
+        <Section
+          title="History"
+          right={
+            history.length > 0 ? (
+              <button className="text-xs text-slate-500 hover:text-red-600" onClick={onClearHistory}>Clear</button>
+            ) : null
+          }
+        >
+          {(history.length > 0 ? history.slice(0, 7) : demoHistory()).map((item) => (
+            <button key={item.id} onClick={() => onSelectRequest(item.request)} className="w-full h-8 px-2 rounded-md flex items-center gap-3 text-sm text-slate-700 hover:bg-slate-50">
+              <span className={methodClass(item.method)}>{item.method}</span>
+              <span className="flex-1 truncate text-left">{displayPath(item.request)}</span>
+              <span className="text-xs text-slate-400">{formatTime(item.timestamp)}</span>
+            </button>
+          ))}
+        </Section>
       </div>
 
-      {/* New Collection Input */}
-      {showNewCollection && (
-        <div className="p-3 bg-[#0e1322] border-b border-gray-850 flex items-center gap-1.5 animate-in slide-in-from-top-1 duration-150">
-          <input
-            type="text"
-            className="flex-1 bg-gray-950 border border-gray-800 rounded px-2.5 py-1 text-xs outline-none text-gray-250 font-medium"
-            placeholder="New collection..."
-            value={newCollName}
-            autoFocus
-            onChange={(e) => setNewCollName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && newCollName.trim()) {
-                onCreateCollection(newCollName.trim());
-                setNewCollName("");
-                setShowNewCollection(false);
-              } else if (e.key === "Escape") {
-                setShowNewCollection(false);
-                setNewCollName("");
-              }
-            }}
-          />
-          <button
-            onClick={() => {
-              if (newCollName.trim()) {
-                onCreateCollection(newCollName.trim());
-                setNewCollName("");
-                setShowNewCollection(false);
-              }
-            }}
-            className="text-indigo-400 font-bold hover:text-indigo-300 text-xs"
-          >
-            ✓
-          </button>
-          <button
-            onClick={() => {
-              setShowNewCollection(false);
-              setNewCollName("");
-            }}
-            className="text-gray-500 hover:text-gray-300 text-xs"
-          >
-            ✕
-          </button>
-        </div>
-      )}
+      <ResourcePanel metrics={resourceMetrics} />
 
-      {/* List Container */}
-      <div className="flex-1 overflow-y-auto p-2 space-y-1">
-        {activeTab === "collections" ? (
-          collections.length === 0 ? (
-            <div className="text-center py-8 text-xs text-gray-500 leading-relaxed">
-              No collections added.<br />Create one or import a Postman file.
-            </div>
-          ) : (
-            collections
-              .filter((c) => c.name.toLowerCase().includes(searchTerm.toLowerCase()))
-              .map((c) => (
-                <div key={c.id} className="rounded overflow-hidden">
-                  {/* Collection Header */}
-                  <div className="group flex items-center justify-between p-2 hover:bg-gray-855 rounded transition cursor-pointer">
-                    <div 
-                      className="flex items-center gap-2 text-gray-200 font-semibold truncate flex-1"
-                      onClick={() => toggleFolder(c.id)}
-                    >
-                      {expandedFolders[c.id] ? <ChevronDown className="w-3.5 h-3.5 text-gray-400" /> : <ChevronRight className="w-3.5 h-3.5 text-gray-400" />}
-                      <span className="truncate">{c.name}</span>
-                    </div>
-
-                    <div className="hidden group-hover:flex items-center gap-1.5">
-                      <button
-                        className="p-1 hover:text-indigo-400 text-gray-500 transition cursor-pointer"
-                        title="Create request"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          showCustomPrompt("Create Request", "Request name...", "", (name) => {
-                            onCreateRequest(c.id, null, name);
-                          });
-                        }}
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        className="p-1 hover:text-amber-400 text-gray-500 transition cursor-pointer"
-                        title="Create folder"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          showCustomPrompt("Create Folder", "Folder name...", "", (name) => {
-                            onCreateFolder(c.id, name);
-                          });
-                        }}
-                      >
-                        <Folder className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        className="p-1 hover:text-cyan-400 text-gray-500 transition cursor-pointer"
-                        title="Export Postman collection"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleExport(c);
-                        }}
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        className="p-1 hover:text-red-400 text-gray-500 transition cursor-pointer"
-                        title="Delete collection"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          showCustomConfirm(
-                            "Delete Collection", 
-                            `Are you sure you want to delete collection "${c.name}"? This action cannot be undone.`, 
-                            () => onDeleteCollection(c.id)
-                          );
-                        }}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Collection Content */}
-                  {expandedFolders[c.id] && (
-                    <div className="pl-4 space-y-0.5 border-l border-gray-800 ml-3.5 py-1 animate-in fade-in duration-100">
-                      {/* Top level requests */}
-                      {c.requests.map((r) => (
-                        <div
-                          key={r.id}
-                          className={`group flex items-center justify-between px-2 py-1.5 rounded transition cursor-pointer ${
-                            activeRequest?.id === r.id
-                              ? "bg-indigo-950/40 text-indigo-300 border-r-2 border-indigo-500"
-                              : "text-gray-400 hover:bg-gray-850 hover:text-gray-200"
-                          }`}
-                          onClick={() => onSelectRequest(r)}
-                        >
-                          <div className="flex items-center gap-2 truncate flex-1">
-                            <span
-                              className={`text-[9px] font-bold w-9 text-right shrink-0 ${
-                                r.method === "GET"
-                                  ? "text-emerald-400"
-                                  : r.method === "POST"
-                                  ? "text-indigo-400"
-                                  : r.method === "PUT"
-                                  ? "text-amber-400"
-                                  : r.method === "DELETE"
-                                  ? "text-red-400"
-                                  : "text-gray-400"
-                              }`}
-                            >
-                              {r.method}
-                            </span>
-                            <span className="truncate text-xs">{r.name}</span>
-                          </div>
-                          <button
-                            className="hidden group-hover:block p-0.5 hover:text-red-400 text-gray-650 transition cursor-pointer"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              showCustomConfirm("Delete Request", `Delete request "${r.name}"?`, () => {
-                                onDeleteRequest(c.id, null, r.id);
-                              });
-                            }}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      ))}
-
-                      {/* Folders */}
-                      {c.folders.map((f) => (
-                        <div key={f.id} className="space-y-0.5">
-                          <div className="group flex items-center justify-between p-1.5 hover:bg-gray-800 rounded transition cursor-pointer text-gray-300">
-                            <div 
-                              className="flex items-center gap-1.5 truncate flex-1 text-xs"
-                              onClick={() => toggleFolder(f.id)}
-                            >
-                              <Folder className="w-3.5 h-3.5 text-gray-500 shrink-0" />
-                              <span className="truncate">{f.name}</span>
-                            </div>
-                            <div className="hidden group-hover:flex items-center gap-1">
-                              <button
-                                className="p-0.5 hover:text-indigo-400 text-gray-500 transition cursor-pointer"
-                                title="Add request"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  showCustomPrompt("Create Request", "Request name...", "", (name) => {
-                                    onCreateRequest(c.id, f.id, name);
-                                  });
-                                }}
-                              >
-                                <Plus className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </div>
-
-                          {expandedFolders[f.id] && (
-                            <div className="pl-3 border-l border-gray-800 ml-3.5 py-0.5 animate-in fade-in duration-100">
-                              {f.requests.map((r) => (
-                                <div
-                                  key={r.id}
-                                  className={`group flex items-center justify-between px-2 py-1.5 rounded transition cursor-pointer ${
-                                    activeRequest?.id === r.id
-                                      ? "bg-indigo-950/40 text-indigo-300 border-r-2 border-indigo-500"
-                                      : "text-gray-400 hover:bg-gray-850 hover:text-gray-200"
-                                  }`}
-                                  onClick={() => onSelectRequest(r)}
-                                >
-                                  <div className="flex items-center gap-2 truncate flex-1">
-                                    <span
-                                      className={`text-[9px] font-bold w-9 text-right shrink-0 ${
-                                        r.method === "GET"
-                                          ? "text-emerald-400"
-                                          : r.method === "POST"
-                                          ? "text-indigo-400"
-                                          : r.method === "PUT"
-                                          ? "text-amber-400"
-                                          : r.method === "DELETE"
-                                          ? "text-red-400"
-                                          : "text-gray-400"
-                                      }`}
-                                    >
-                                      {r.method}
-                                    </span>
-                                    <span className="truncate text-xs">{r.name}</span>
-                                  </div>
-                                  <button
-                                    className="hidden group-hover:block p-0.5 hover:text-red-400 text-gray-650 transition cursor-pointer"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      showCustomConfirm("Delete Request", `Delete request "${r.name}"?`, () => {
-                                        onDeleteRequest(c.id, f.id, r.id);
-                                      });
-                                    }}
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))
-          )
-        ) : history.length === 0 ? (
-          <div className="text-center py-8 text-xs text-gray-500">
-            No history. Sent requests appear here.
-          </div>
-        ) : (
-          <div className="space-y-0.5">
-            <div className="flex justify-between items-center px-2 py-1 text-gray-500 text-[10px] uppercase font-bold select-none">
-              <span>Past Runs</span>
-              <button className="hover:text-red-400 cursor-pointer" onClick={onClearHistory}>Clear</button>
-            </div>
-            {history
-              .filter((h) => h.url.toLowerCase().includes(searchTerm.toLowerCase()))
-              .map((h) => (
-                <div
-                  key={h.id}
-                  className="group flex items-center justify-between px-2 py-2 hover:bg-gray-800 rounded transition cursor-pointer text-xs"
-                  onClick={() => onSelectRequest(h.request)}
-                >
-                  <div className="flex items-center gap-2 truncate flex-1">
-                    <span
-                      className={`text-[9px] font-bold w-9 text-right shrink-0 ${
-                        h.method === "GET"
-                          ? "text-emerald-400"
-                          : h.method === "POST"
-                          ? "text-indigo-400"
-                          : h.method === "PUT"
-                          ? "text-amber-400"
-                          : h.method === "DELETE"
-                          ? "text-red-400"
-                          : "text-gray-400"
-                      }`}
-                    >
-                      {h.method}
-                    </span>
-                    <span className="truncate text-gray-300 font-mono text-[11px]">{h.url}</span>
-                  </div>
-                  <span className="text-[10px] text-gray-550 select-none font-medium">{h.response?.status}</span>
-                </div>
-              ))}
-          </div>
-        )}
+      <div className="h-12 px-5 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500">
+        <span className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-emerald-500" />
+          Online
+        </span>
+        <span>v{packageJson.version}</span>
       </div>
 
-      {/* Sidebar Footer / Version Info */}
-      <div className="p-2.5 border-t border-gray-850 bg-gray-950/30 text-center select-none text-[10px] text-gray-500 font-medium flex items-center justify-between shrink-0">
-        <span className="font-mono">v{packageJson.version}</span>
-        <span className="text-gray-600">Clotient Studio</span>
-      </div>
+      <div className="ct-resize-handle ct-resize-handle-y" onMouseDown={onStartResize} title="Resize sidebar" />
 
-      {/* Environments Modal */}
       {showEnvModal && (
-        <EnvironmentManagerModal
+        <EnvironmentModal
           environments={environments}
+          activeEnv={activeEnv}
           onClose={() => setShowEnvModal(false)}
-          onSave={(updatedEnvs) => {
-            onUpdateEnvironments(updatedEnvs);
-            // Sync active environment variables
-            if (activeEnv) {
-              const updatedActive = updatedEnvs.find(e => e.id === activeEnv.id);
-              if (updatedActive) onSelectEnv(updatedActive);
-            }
-          }}
+          onSelectEnv={onSelectEnv}
+          onUpdateEnvironments={onUpdateEnvironments}
         />
       )}
+      {dialog && <PromptDialog {...dialog} onClose={() => setDialog(null)} />}
+    </aside>
+  );
+}
 
-      {/* Custom dialog prompt / confirm overlay modal */}
-      {dialogOpen && dialogConfig && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-gray-900 border border-gray-800 rounded-lg w-full max-w-sm overflow-hidden text-sm shadow-2xl animate-in fade-in duration-200">
-            <div className="p-4 bg-gray-950 border-b border-gray-850 flex justify-between items-center">
-              <h4 className="text-gray-100 font-semibold">{dialogConfig.title}</h4>
-              <button onClick={() => setDialogOpen(false)} className="text-gray-400 hover:text-white cursor-pointer">✕</button>
-            </div>
-            <div className="p-4 space-y-3">
-              {dialogConfig.message && (
-                <p className="text-xs text-gray-400 leading-relaxed select-text">{dialogConfig.message}</p>
-              )}
-              {dialogConfig.type === "prompt" && (
-                <input
-                  type="text"
-                  id="custom-dialog-input"
-                  className="w-full bg-gray-950 border border-gray-850 rounded px-3 py-2 text-xs outline-none text-gray-250 focus:border-indigo-500 font-medium"
-                  placeholder={dialogConfig.placeholder}
-                  defaultValue={dialogConfig.defaultValue}
-                  autoFocus
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      const val = (document.getElementById("custom-dialog-input") as HTMLInputElement)?.value;
-                      dialogConfig.onConfirm(val);
-                    } else if (e.key === "Escape") {
-                      setDialogOpen(false);
-                    }
-                  }}
-                />
-              )}
-            </div>
-            <div className="px-4 py-3 bg-gray-950 border-t border-gray-800 flex justify-end gap-2.5">
-              <button
-                onClick={() => setDialogOpen(false)}
-                className="px-3.5 py-1.5 border border-gray-705 hover:bg-gray-800 text-gray-300 rounded text-xs transition cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  const val = dialogConfig.type === "prompt" 
-                    ? (document.getElementById("custom-dialog-input") as HTMLInputElement)?.value 
-                    : undefined;
-                  dialogConfig.onConfirm(val);
-                }}
-                className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs transition font-semibold cursor-pointer"
-              >
-                Confirm
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+function ResourcePanel({ metrics }: { metrics: ResourceMetrics }) {
+  return (
+    <div className="ct-resource-panel">
+      <div className="ct-resource-head">
+        <span>Resource use</span>
+        <em>{metrics.live ? "Live" : "Est."}</em>
+      </div>
+      <div className="ct-resource-grid">
+        <MetricPill label="Memory" value={metrics.memory} />
+        <MetricPill label="Load" value={metrics.load} />
+        <MetricPill label="Storage" value={metrics.storage} />
+        <MetricPill label="Delta" value={metrics.delta} />
+      </div>
     </div>
   );
 }
 
-/* Sub-component: Environment Variable Manager Modal */
-function EnvironmentManagerModal({
+function MetricPill({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="ct-resource-pill">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function Section({ title, right, children }: { title: string; right?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="px-4 py-3 border-b border-slate-200">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400">{title}</span>
+        {right}
+      </div>
+      <div className="space-y-1">{children}</div>
+    </div>
+  );
+}
+
+function RequestRow({ request, active, onSelect, onDelete }: { request: ClotientRequest; active: boolean; onSelect: () => void; onDelete: () => void }) {
+  return (
+    <div onClick={onSelect} className={`group h-8 px-2 rounded-md flex items-center gap-3 cursor-pointer ${active ? "bg-blue-50 text-blue-800" : "text-slate-700 hover:bg-slate-50"}`}>
+      <span className={methodClass(request.method)}>{request.method}</span>
+      <span className="flex-1 truncate text-sm">{displayPath(request)}</span>
+      <button className="hidden group-hover:block text-slate-400 hover:text-red-600" onClick={(event) => { event.stopPropagation(); onDelete(); }}>
+        <Trash2 size={14} />
+      </button>
+    </div>
+  );
+}
+
+function displayPath(request: ClotientRequest) {
+  if (request.name.startsWith("/")) return request.name;
+  try {
+    return new URL(request.url).pathname;
+  } catch {
+    return request.name;
+  }
+}
+
+function demoHistory(): HistoryItem[] {
+  const base = Date.now();
+  return [
+    ["GET", "/v1/users", 2],
+    ["POST", "/v1/auth/login", 5],
+    ["GET", "/v1/users/:id", 12],
+    ["PUT", "/v1/users/:id", 20],
+    ["GET", "/v1/health", 35]
+  ].map(([method, path, minutes]) => ({
+    id: `${method}-${path}`,
+    method: String(method),
+    url: String(path),
+    timestamp: base - Number(minutes) * 60_000,
+    request: {
+      id: `${method}-${path}-request`,
+      name: String(path),
+      method: method as ClotientRequest["method"],
+      url: `http://localhost:3000${String(path).replace(":id", "usr_1")}`,
+      headers: [],
+      params: [],
+      body: { type: "none", rawText: "", urlencoded: [], formData: [] },
+      scripts: { preRequest: "", postRequest: "" },
+      auth: { type: "none" }
+    }
+  }));
+}
+
+function PromptDialog({
+  title,
+  message,
+  placeholder,
+  defaultValue,
+  danger,
+  onConfirm,
+  onClose
+}: {
+  title: string;
+  message?: string;
+  placeholder?: string;
+  defaultValue?: string;
+  danger?: boolean;
+  onConfirm: (value?: string) => void;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(defaultValue || "");
+  const isPrompt = placeholder !== undefined;
+
+  return (
+    <div className="ct-modal-backdrop">
+      <div className="ct-modal max-w-sm">
+        <div className="px-4 py-3 border-b border-slate-200">
+          <h3 className="font-semibold text-slate-900">{title}</h3>
+        </div>
+        <div className="p-4 space-y-3">
+          {message && <p className="text-sm text-slate-600">{message}</p>}
+          {isPrompt && (
+            <input
+              autoFocus
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") onConfirm(value);
+                if (event.key === "Escape") onClose();
+              }}
+              placeholder={placeholder}
+              className="w-full h-9 rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-400"
+            />
+          )}
+        </div>
+        <div className="px-4 py-3 border-t border-slate-200 bg-slate-50 flex justify-end gap-2">
+          <button className="ct-secondary h-8 px-3 text-xs" onClick={onClose}>Cancel</button>
+          <button className={`${danger ? "bg-red-600 border-red-600 hover:bg-red-700" : "ct-primary"} h-8 px-3 rounded-md text-xs font-semibold text-white`} onClick={() => onConfirm(value)}>
+            Confirm
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EnvironmentModal({
   environments,
+  activeEnv,
   onClose,
-  onSave
+  onSelectEnv,
+  onUpdateEnvironments
 }: {
   environments: Environment[];
+  activeEnv: Environment | null;
   onClose: () => void;
-  onSave: (envs: Environment[]) => void;
+  onSelectEnv: (env: Environment | null) => void;
+  onUpdateEnvironments: (envs: Environment[]) => void;
 }) {
-  const [envs, setEnvs] = useState<Environment[]>(JSON.parse(JSON.stringify(environments)));
-  const [selectedEnvId, setSelectedEnvId] = useState<string | null>(
-    envs.length > 0 ? envs[0].id : null
-  );
-  const [isAddingEnv, setIsAddingEnv] = useState(false);
-  const [newEnvName, setNewEnvName] = useState("");
+  const selected = activeEnv || environments[0] || null;
 
-  const activeEnv = envs.find((e) => e.id === selectedEnvId) || null;
-
-  const handleConfirmAddEnv = () => {
-    if (!newEnvName.trim()) return;
-    const newEnv: Environment = {
-      id: Math.random().toString(36).substring(2, 11),
-      name: newEnvName.trim(),
-      variables: []
-    };
-    setEnvs([...envs, newEnv]);
-    setSelectedEnvId(newEnv.id);
-    setNewEnvName("");
-    setIsAddingEnv(false);
+  const updateSelected = (next: Environment) => {
+    onUpdateEnvironments(environments.map((env) => (env.id === next.id ? next : env)));
+    onSelectEnv(next);
   };
 
-  const deleteEnvironment = (id: string) => {
-    const updated = envs.filter((e) => e.id !== id);
-    setEnvs(updated);
-    if (selectedEnvId === id) {
-      setSelectedEnvId(updated.length > 0 ? updated[0].id : null);
-    }
+  const addEnvironment = () => {
+    const nextEnv: Environment = { id: id(), name: "New Environment", variables: [] };
+    onUpdateEnvironments([...environments, nextEnv]);
+    onSelectEnv(nextEnv);
   };
 
   const addVariable = () => {
-    if (!activeEnv) return;
-    activeEnv.variables.push({
-      id: Math.random().toString(36).substring(2, 11),
-      key: "new_variable",
-      value: "value",
-      enabled: true
-    });
-    setEnvs([...envs]);
+    if (!selected) return;
+    updateSelected({ ...selected, variables: [...selected.variables, { id: id(), key: "new_variable", value: "", enabled: true }] });
   };
 
-  const updateVariable = (varId: string, fields: Partial<{ key: string; value: string; enabled: boolean }>) => {
-    if (!activeEnv) return;
-    const idx = activeEnv.variables.findIndex((v) => v.id === varId);
-    if (idx !== -1) {
-      activeEnv.variables[idx] = { ...activeEnv.variables[idx], ...fields };
-      setEnvs([...envs]);
-    }
+  const updateVariable = (variableId: string, fields: Partial<KeyValue>) => {
+    if (!selected) return;
+    updateSelected({ ...selected, variables: selected.variables.map((variable) => (variable.id === variableId ? { ...variable, ...fields } : variable)) });
   };
 
-  const deleteVariable = (varId: string) => {
-    if (!activeEnv) return;
-    activeEnv.variables = activeEnv.variables.filter((v) => v.id !== varId);
-    setEnvs([...envs]);
+  const deleteVariable = (variableId: string) => {
+    if (!selected) return;
+    updateSelected({ ...selected, variables: selected.variables.filter((variable) => variable.id !== variableId) });
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-200">
-      <div className="bg-gray-900 border border-gray-800 rounded-lg w-full max-w-3xl flex flex-col h-[500px] overflow-hidden text-sm shadow-2xl">
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-800 flex justify-between items-center bg-gray-950 select-none">
-          <h3 className="text-gray-100 font-semibold flex items-center gap-2">
-            <Settings className="w-4 h-4 text-cyan-400" />
-            Manage Environment Variables
-          </h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-white cursor-pointer">✕</button>
+    <div className="ct-modal-backdrop">
+      <div className="ct-modal">
+        <div className="h-14 px-5 border-b border-slate-200 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Globe2 size={18} className="text-blue-600" />
+            <h3 className="font-semibold text-slate-900">Environments</h3>
+          </div>
+          <button className="ct-secondary h-8 px-3 text-xs" onClick={onClose}>Done</button>
         </div>
-
-        {/* Content Box */}
-        <div className="flex-1 flex overflow-hidden">
-          {/* Left panel: Envs list */}
-          <div className="w-1/3 border-r border-gray-800 p-3 bg-gray-900/50 flex flex-col gap-2">
-            <div className="flex justify-between items-center text-[10px] text-gray-500 uppercase font-bold px-1 select-none">
-              <span>Environments</span>
-              <button 
-                onClick={() => setIsAddingEnv(true)}
-                className="text-indigo-400 hover:text-indigo-350 flex items-center gap-0.5 cursor-pointer"
-              >
-                <Plus className="w-3.5 h-3.5" /> Add
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto space-y-1">
-              {envs.map((e) => (
-                <div
-                  key={e.id}
-                  className={`flex items-center justify-between px-3 py-2 rounded cursor-pointer transition text-xs select-none ${
-                    selectedEnvId === e.id
-                      ? "bg-indigo-950/50 text-indigo-400 border border-indigo-500/30"
-                      : "text-gray-400 hover:bg-gray-800 hover:text-gray-200 border border-transparent"
-                  }`}
-                  onClick={() => setSelectedEnvId(e.id)}
-                >
-                  <span className="truncate flex-1 mr-2">{e.name}</span>
-                  <button
-                    className="hover:text-red-400 text-gray-500 p-0.5 transition cursor-pointer"
-                    onClick={(evt) => {
-                      evt.stopPropagation();
-                      deleteEnvironment(e.id);
-                    }}
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+        <div className="min-h-0 flex-1 grid grid-cols-[220px_1fr]">
+          <div className="border-r border-slate-200 p-3 bg-slate-50">
+            <button className="ct-primary h-8 w-full text-xs mb-3" onClick={addEnvironment}>New environment</button>
+            <div className="space-y-1">
+              {environments.map((environment) => (
+                <button key={environment.id} className={`w-full h-8 px-2 rounded-md text-left text-sm font-medium ${selected?.id === environment.id ? "bg-white text-blue-700 border border-slate-200" : "text-slate-600 hover:bg-white"}`} onClick={() => onSelectEnv(environment)}>
+                  {environment.name}
+                </button>
               ))}
-
-              {isAddingEnv && (
-                <div className="flex items-center gap-1.5 mt-1 bg-gray-950 border border-gray-850 rounded p-1.5 animate-in fade-in slide-in-from-top-1 duration-150">
-                  <input
-                    type="text"
-                    className="w-full bg-transparent text-gray-250 text-xs outline-none font-medium px-1 py-0.5"
-                    placeholder="Env Name..."
-                    value={newEnvName}
-                    autoFocus
-                    onChange={(e) => setNewEnvName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        handleConfirmAddEnv();
-                      } else if (e.key === "Escape") {
-                        setIsAddingEnv(false);
-                        setNewEnvName("");
-                      }
-                    }}
-                  />
-                  <button
-                    onClick={handleConfirmAddEnv}
-                    className="text-emerald-400 hover:text-emerald-300 font-bold text-xs cursor-pointer"
-                    title="Confirm"
-                  >
-                    ✓
-                  </button>
-                  <button
-                    onClick={() => {
-                      setIsAddingEnv(false);
-                      setNewEnvName("");
-                    }}
-                    className="text-red-400 hover:text-red-300 font-bold text-xs cursor-pointer"
-                    title="Cancel"
-                  >
-                    ✕
-                  </button>
-                </div>
-              )}
             </div>
           </div>
-
-          {/* Right panel: Variables table */}
-          <div className="w-2/3 p-4 flex flex-col overflow-hidden">
-            {activeEnv ? (
-              <div className="flex-1 flex flex-col overflow-hidden">
-                <div className="flex justify-between items-center mb-3">
-                  <h4 className="text-gray-200 font-semibold">{activeEnv.name}</h4>
-                  <button
-                    onClick={addVariable}
-                    className="px-2.5 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded flex items-center gap-1 transition cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5" /> Add Variable
-                  </button>
+          <div className="min-w-0 p-5 overflow-y-auto">
+            {selected ? (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wide text-slate-400 mb-1">Name</label>
+                  <input value={selected.name} onChange={(event) => updateSelected({ ...selected, name: event.target.value })} className="w-full h-9 rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-400" />
                 </div>
-
-                <div className="flex-1 overflow-y-auto border border-gray-800 rounded bg-gray-950">
-                  <table className="w-full text-xs text-left border-collapse">
-                    <thead className="bg-gray-900 border-b border-gray-800 text-gray-400 uppercase font-semibold select-none">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-semibold text-slate-900">Variables</h4>
+                  <button className="ct-secondary h-8 px-3 text-xs" onClick={addVariable}>Add variable</button>
+                </div>
+                <div className="ct-panel overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-50 text-xs uppercase text-slate-400">
                       <tr>
-                        <th className="p-2 w-8 text-center">Active</th>
-                        <th className="p-2 w-1/3">Variable Key</th>
-                        <th className="p-2 w-1/3">Value</th>
-                        <th className="p-2 w-10 text-center">Delete</th>
+                        <th className="w-10 p-2 text-center">On</th>
+                        <th className="p-2 text-left">Key</th>
+                        <th className="p-2 text-left">Value</th>
+                        <th className="w-10 p-2" />
                       </tr>
                     </thead>
                     <tbody>
-                      {activeEnv.variables.map((v) => (
-                        <tr key={v.id} className="border-b border-gray-900 hover:bg-gray-900/40">
-                          <td className="p-2 text-center">
-                            <input
-                              type="checkbox"
-                              checked={v.enabled}
-                              onChange={(evt) => updateVariable(v.id, { enabled: evt.target.checked })}
-                              className="accent-indigo-500 cursor-pointer"
-                            />
-                          </td>
-                          <td className="p-2">
-                            <input
-                              type="text"
-                              value={v.key}
-                              placeholder="VARIABLE_NAME"
-                              onChange={(evt) => updateVariable(v.id, { key: evt.target.value })}
-                              className="w-full bg-transparent text-gray-300 outline-none focus:border-b focus:border-indigo-500 font-mono"
-                            />
-                          </td>
-                          <td className="p-2">
-                            <input
-                              type="text"
-                              value={v.value}
-                              placeholder="Value"
-                              onChange={(evt) => updateVariable(v.id, { value: evt.target.value })}
-                              className="w-full bg-transparent text-gray-300 outline-none focus:border-b focus:border-indigo-500 font-mono"
-                            />
-                          </td>
-                          <td className="p-2 text-center">
-                            <button
-                              onClick={() => deleteVariable(v.id)}
-                              className="text-gray-500 hover:text-red-400 transition cursor-pointer"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </td>
+                      {selected.variables.map((variable) => (
+                        <tr key={variable.id} className="border-t border-slate-100">
+                          <td className="p-2 text-center"><input type="checkbox" checked={variable.enabled} onChange={(event) => updateVariable(variable.id, { enabled: event.target.checked })} /></td>
+                          <td className="p-2"><input value={variable.key} onChange={(event) => updateVariable(variable.id, { key: event.target.value })} className="w-full bg-transparent outline-none font-mono text-xs" /></td>
+                          <td className="p-2"><input value={variable.value} onChange={(event) => updateVariable(variable.id, { value: event.target.value })} className="w-full bg-transparent outline-none font-mono text-xs text-slate-600" /></td>
+                          <td className="p-2 text-center"><button className="text-slate-400 hover:text-red-600" onClick={() => deleteVariable(variable.id)}><Trash2 size={14} /></button></td>
                         </tr>
                       ))}
-                      {activeEnv.variables.length === 0 && (
-                        <tr>
-                          <td colSpan={4} className="p-6 text-center text-gray-500 select-none">
-                            No variables added yet. Click "Add Variable" above.
-                          </td>
-                        </tr>
-                      )}
                     </tbody>
                   </table>
                 </div>
               </div>
             ) : (
-              <div className="flex-1 flex items-center justify-center text-gray-500 text-xs select-none">
-                Select or create an environment from the left sidebar panel.
-              </div>
+              <div className="h-full flex items-center justify-center text-sm text-slate-500">Create an environment to store local variables.</div>
             )}
           </div>
-        </div>
-
-        {/* Footer */}
-        <div className="px-6 py-4 border-t border-gray-800 flex justify-end gap-3 bg-gray-950 select-none">
-          <button
-            onClick={onClose}
-            className="px-4 py-1.5 border border-gray-700 hover:bg-gray-800 text-gray-300 rounded text-xs transition cursor-pointer"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => {
-              onSave(envs);
-              onClose();
-            }}
-            className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs transition font-semibold cursor-pointer"
-          >
-            Save Changes
-          </button>
         </div>
       </div>
     </div>

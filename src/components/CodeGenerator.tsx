@@ -86,26 +86,24 @@ export default function CodeGenerator({ request, activeEnv, onClose }: CodeGener
   ];
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-gray-900 border border-gray-800 rounded-lg w-full max-w-3xl flex flex-col h-[520px] overflow-hidden text-sm">
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-800 flex justify-between items-center bg-gray-950">
-          <h3 className="text-gray-100 font-semibold flex items-center gap-2">
-            <Terminal className="w-4 h-4 text-indigo-400" />
-            Generate Code Request Snippets
+    <div className="ct-modal-backdrop">
+      <div className="ct-modal ct-code-modal">
+        <div className="h-14 px-5 border-b border-slate-200 flex justify-between items-center bg-white">
+          <h3 className="text-slate-900 font-semibold flex items-center gap-2">
+            <Terminal className="w-4 h-4 text-blue-600" />
+            Generate Code
           </h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-white">✕</button>
+          <button onClick={onClose} className="ct-icon-button !h-8 !w-8">✕</button>
         </div>
 
-        {/* Language Tabs */}
-        <div className="flex bg-gray-950 border-b border-gray-850 px-4 overflow-x-auto">
+        <div className="h-12 flex bg-white border-b border-slate-200 px-4 overflow-x-auto">
           {languages.map((lang) => (
             <button
               key={lang.id}
-              className={`py-2 px-3 text-xs border-b-2 font-medium transition cursor-pointer whitespace-nowrap ${
+              className={`h-12 px-3 border-b-2 text-xs font-semibold whitespace-nowrap ${
                 activeLang === lang.id
-                  ? "border-indigo-500 text-indigo-400 bg-gray-900/40"
-                  : "border-transparent text-gray-500 hover:text-gray-300"
+                  ? "border-blue-500 text-blue-700"
+                  : "border-transparent text-slate-500 hover:text-slate-800"
               }`}
               onClick={() => setActiveLang(lang.id)}
             >
@@ -114,34 +112,31 @@ export default function CodeGenerator({ request, activeEnv, onClose }: CodeGener
           ))}
         </div>
 
-        {/* Snippet Output */}
-        <div className="flex-1 p-4 bg-gray-950 flex flex-col overflow-hidden relative">
+        <div className="flex-1 min-h-0 p-4 bg-slate-50/70 flex flex-col overflow-hidden relative">
           <button
             onClick={handleCopy}
-            className="absolute top-6 right-6 p-2 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white rounded border border-gray-700 transition flex items-center gap-1.5 text-xs"
+            className={`absolute top-6 right-6 h-9 px-3 rounded-md border text-xs font-semibold flex items-center gap-2 ${
+              copied ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+            }`}
           >
             {copied ? (
               <>
-                <Check className="w-3.5 h-3.5 text-emerald-400" /> Copied!
+                <Check className="w-3.5 h-3.5" /> Copied
               </>
             ) : (
               <>
-                <Copy className="w-3.5 h-3.5" /> Copy Code
+                <Copy className="w-3.5 h-3.5" /> Copy
               </>
             )}
           </button>
-          <pre className="flex-1 overflow-auto text-xs font-mono text-gray-300 bg-gray-900 border border-gray-800 p-4 rounded leading-relaxed select-text">
+          <pre className="flex-1 overflow-auto text-xs font-mono text-slate-800 bg-white border border-slate-200 p-4 pr-24 rounded-md leading-relaxed select-text">
             <code>{codeSnippet}</code>
           </pre>
         </div>
 
-        {/* Footer */}
-        <div className="px-6 py-4 border-t border-gray-800 flex justify-end bg-gray-950">
-          <button
-            onClick={onClose}
-            className="px-5 py-1.5 bg-gray-850 hover:bg-gray-800 text-gray-300 rounded text-xs transition border border-gray-700"
-          >
-            Close Viewer
+        <div className="px-5 py-4 border-t border-slate-200 flex justify-end bg-white">
+          <button onClick={onClose} className="ct-secondary h-9 px-4">
+            Close
           </button>
         </div>
       </div>

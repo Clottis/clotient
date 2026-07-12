@@ -1,10 +1,13 @@
-import { useState, useEffect, useRef } from "react";
-import { Send, Code, Trash2, ChevronDown, XCircle } from "lucide-react";
-import { ClotientRequest, KeyValue, BodyType, Environment } from "../types";
+import { useEffect, useRef, useState } from "react";
+import { CheckCircle2, ChevronDown, Code2, Save, Send, StopCircle, Trash2 } from "lucide-react";
+import { BodyType, ClotientRequest, Environment, KeyValue } from "../types";
 
 interface RequestBuilderProps {
   request: ClotientRequest;
   onChange: (req: ClotientRequest) => void;
+  onSave: () => void;
+  saveStatus: "idle" | "saving" | "saved" | "error";
+  saveMessage: string;
   onSend: () => void;
   onGenerateCode: () => void;
   loading: boolean;
@@ -13,11 +16,33 @@ interface RequestBuilderProps {
   onCreateEnvVar?: (key: string, value: string) => void;
 }
 
-type TabType = "params" | "headers" | "body" | "auth" | "scripts";
+type TabType = "params" | "auth" | "headers" | "body" | "scripts";
+
+const newRow = (): KeyValue => ({
+  id: Math.random().toString(36).substring(2, 11),
+  key: "",
+  value: "",
+  enabled: true,
+  description: ""
+});
+
+function methodClass(method: string) {
+  return `ct-method ${method}`;
+}
+
+function withTrailingRow(list: KeyValue[]) {
+  const rows = [...list];
+  const last = rows[rows.length - 1];
+  if (!last || last.key.trim() || last.value.trim()) rows.push(newRow());
+  return rows;
+}
 
 export default function RequestBuilder({
   request,
   onChange,
+  onSave,
+  saveStatus,
+  saveMessage,
   onSend,
   onGenerateCode,
   loading,
@@ -27,943 +52,502 @@ export default function RequestBuilder({
 }: RequestBuilderProps) {
   const [activeTab, setActiveTab] = useState<TabType>("params");
   const [bodyTab, setBodyTab] = useState<BodyType>(request.body.type);
-  const [scriptSubTab, setScriptSubTab] = useState<"pre" | "post">("pre");
-
-  // Autocomplete suggestions states
+  const [scriptTab, setScriptTab] = useState<"pre" | "post">("pre");
+  const [showMethodDropdown, setShowMethodDropdown] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const [suggestTriggerPos, setSuggestTriggerPos] = useState<{ start: number; end: number } | null>(null);
-  
-  // Custom dropdown states & refs
-  const [showMethodDropdown, setShowMethodDropdown] = useState(false);
-  const [showAuthDropdown, setShowAuthDropdown] = useState(false);
 
-  const methodDropdownRef = useRef<HTMLDivElement | null>(null);
-  const authDropdownRef = useRef<HTMLDivElement | null>(null);
-  const urlInputRef = useRef<HTMLInputElement | null>(null);
+  const methodRef = useRef<HTMLDivElement | null>(null);
+  const urlRef = useRef<HTMLInputElement | null>(null);
 
-  // Close dropdowns on click outside
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (methodDropdownRef.current && !methodDropdownRef.current.contains(event.target as Node)) {
-        setShowMethodDropdown(false);
-      }
-      if (authDropdownRef.current && !authDropdownRef.current.contains(event.target as Node)) {
-        setShowAuthDropdown(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
-  }, []);
-
-  // Keep body tab in sync with request changes
   useEffect(() => {
     setBodyTab(request.body.type);
-  }, [request.body.type]);
+  }, [request.body.type, request.id]);
 
-  const updateRequest = (fields: Partial<ClotientRequest>) => {
-    onChange({ ...request, ...fields });
-  };
-
-  const updateBody = (fields: Partial<ClotientRequest["body"]>) => {
-    onChange({
-      ...request,
-      body: { ...request.body, ...fields }
-    });
-  };
-
-  // Helper to ensure key-value tables have a trailing empty row for ease of adding
-  const ensureTrailingEmptyRow = (list: KeyValue[]): KeyValue[] => {
-    const listCopy = [...list];
-    const last = listCopy[listCopy.length - 1];
-    if (!last || last.key.trim() !== "" || last.value.trim() !== "") {
-      listCopy.push({
-        id: Math.random().toString(36).substring(2, 11),
-        key: "",
-        value: "",
-        enabled: true,
-        description: ""
-      });
+  useEffect(() => {
+    function handleClick(event: MouseEvent) {
+      if (methodRef.current && !methodRef.current.contains(event.target as Node)) {
+        setShowMethodDropdown(false);
+      }
     }
-    return listCopy;
-  };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
 
-  // Generic key-value update handler
-  const handleKeyValueChange = (
+  const updateRequest = (fields: Partial<ClotientRequest>) => onChange({ ...request, ...fields });
+  const updateBody = (fields: Partial<ClotientRequest["body"]>) => onChange({ ...request, body: { ...request.body, ...fields } });
+
+  const updateKeyValue = (
     list: KeyValue[],
     index: number,
     fields: Partial<KeyValue>,
-    onSave: (newList: KeyValue[]) => void
+    save: (rows: KeyValue[]) => void
   ) => {
-    const newList = [...list];
-    newList[index] = { ...newList[index], ...fields };
-
-    // Auto-append trailing empty row if user typed in the last row
+    const next = [...list];
+    next[index] = { ...next[index], ...fields };
     if (index === list.length - 1 && (fields.key !== undefined || fields.value !== undefined)) {
-      newList.push({
-        id: Math.random().toString(36).substring(2, 11),
-        key: "",
-        value: "",
-        enabled: true,
-        description: ""
-      });
+      next.push(newRow());
     }
-    onSave(newList);
+    save(next.filter((row, rowIndex) => rowIndex === next.length - 1 || row.key.trim() || row.value.trim() || row.description?.trim()));
   };
 
-  const handleKeyValueDelete = (list: KeyValue[], index: number, onSave: (newList: KeyValue[]) => void) => {
-    const newList = list.filter((_, idx) => idx !== index);
-    onSave(newList);
+  const deleteKeyValue = (list: KeyValue[], index: number, save: (rows: KeyValue[]) => void) => {
+    save(list.filter((_, rowIndex) => rowIndex !== index));
   };
 
-  // Sync parameters to/from URL string
-  const syncParamsToUrl = (paramsList: KeyValue[]) => {
-    const activeParams = paramsList.filter((p) => p.enabled && p.key.trim());
-    if (activeParams.length === 0) {
-      // Remove query string
-      const urlBase = request.url.split("?")[0];
-      updateRequest({ url: urlBase, params: paramsList });
+  const syncParamsToUrl = (rows: KeyValue[]) => {
+    const enabled = rows.filter((row) => row.enabled && row.key.trim());
+    const baseUrl = request.url.split("?")[0];
+    if (enabled.length === 0) {
+      updateRequest({ params: rows, url: baseUrl });
       return;
     }
-
-    const searchParams = new URLSearchParams();
-    activeParams.forEach((p) => searchParams.append(p.key, p.value));
-    const urlBase = request.url.split("?")[0];
-    updateRequest({
-      url: `${urlBase}?${searchParams.toString()}`,
-      params: paramsList
-    });
+    const params = new URLSearchParams();
+    enabled.forEach((row) => params.append(row.key, row.value));
+    updateRequest({ params: rows, url: `${baseUrl}?${params.toString()}` });
   };
 
-  const handleUrlChange = (newUrl: string) => {
-    // Attempt to parse query params from URL
-    try {
-      const qIdx = newUrl.indexOf("?");
-      if (qIdx !== -1) {
-        const queryStr = newUrl.substring(qIdx + 1);
-        const searchParams = new URLSearchParams(queryStr);
-        const newParams: KeyValue[] = [];
-        
-        searchParams.forEach((value, key) => {
-          newParams.push({
-            id: Math.random().toString(36).substring(2, 11),
-            key,
-            value,
-            enabled: true,
-            description: ""
-          });
-        });
-        
-        // Add trailing empty row
-        newParams.push({
-          id: Math.random().toString(36).substring(2, 11),
-          key: "",
-          value: "",
-          enabled: true,
-          description: ""
-        });
-
-        onChange({
-          ...request,
-          url: newUrl,
-          params: newParams
-        });
-        return;
-      }
-    } catch {
-      // fallback to basic write
+  const handleUrlChange = (value: string) => {
+    const queryIndex = value.indexOf("?");
+    if (queryIndex >= 0) {
+      const params = new URLSearchParams(value.slice(queryIndex + 1));
+      const rows: KeyValue[] = [];
+      params.forEach((paramValue, key) => {
+        rows.push({ ...newRow(), key, value: paramValue });
+      });
+      onChange({ ...request, url: value, params: rows });
+      return;
     }
-
-    onChange({ ...request, url: newUrl });
+    updateRequest({ url: value });
   };
 
-  // Autocomplete core methods
-  const availableVars = activeEnv?.variables.filter((v) => v.enabled && v.key) || [];
+  const availableVars = activeEnv?.variables.filter((variable) => variable.enabled && variable.key.trim()) || [];
 
-  const handleUrlInputChange = (val: string, cursorSel: number) => {
-    handleUrlChange(val);
-
-    const textBeforeCursor = val.substring(0, cursorSel);
-    const lastOpenIdx = textBeforeCursor.lastIndexOf("{{");
-    const lastCloseIdx = textBeforeCursor.lastIndexOf("}}");
-
-    if (lastOpenIdx !== -1 && lastOpenIdx > lastCloseIdx) {
-      const query = textBeforeCursor.substring(lastOpenIdx + 2);
+  const handleUrlInput = (value: string, cursor: number) => {
+    handleUrlChange(value);
+    const beforeCursor = value.slice(0, cursor);
+    const openIndex = beforeCursor.lastIndexOf("{{");
+    const closeIndex = beforeCursor.lastIndexOf("}}");
+    if (openIndex >= 0 && openIndex > closeIndex) {
+      const query = beforeCursor.slice(openIndex + 2);
       const matches = availableVars
-        .map((v) => v.key)
-        .filter((k) => k.toLowerCase().includes(query.toLowerCase()));
-
-      // Add inline variable creation choice
-      if (activeEnv && query.trim().length > 0) {
-        if (!matches.some(m => m.toLowerCase() === query.toLowerCase())) {
-          matches.push(`__create_var:${query.trim()}`);
-        }
+        .map((variable) => variable.key)
+        .filter((key) => key.toLowerCase().includes(query.toLowerCase()));
+      if (activeEnv && query.trim() && !matches.some((match) => match.toLowerCase() === query.toLowerCase())) {
+        matches.push(`__create_var:${query.trim()}`);
       }
-
       if (matches.length > 0) {
         setSuggestions(matches);
         setSuggestionIndex(0);
+        setSuggestTriggerPos({ start: openIndex, end: cursor });
         setShowSuggestions(true);
-        setSuggestTriggerPos({ start: lastOpenIdx, end: cursorSel });
         return;
       }
     }
     setShowSuggestions(false);
   };
 
-  const handleUrlKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (showSuggestions) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setSuggestionIndex((prev) => (prev + 1) % suggestions.length);
-      } else if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setSuggestionIndex((prev) => (prev - 1 + suggestions.length) % suggestions.length);
-      } else if (e.key === "Enter" || e.key === "Tab") {
-        e.preventDefault();
-        selectSuggestion(suggestionIndex);
-      } else if (e.key === "Escape") {
-        setShowSuggestions(false);
-      }
-    } else {
-      if (e.key === "Enter" && !loading) {
-        onSend();
-      }
-    }
-  };
-
   const selectSuggestion = (index: number) => {
-    if (!suggestTriggerPos || !urlInputRef.current) return;
-    const selectedVar = suggestions[index];
-    const val = request.url;
-
-    let targetKey = selectedVar;
-    if (selectedVar.startsWith("__create_var:")) {
-      targetKey = selectedVar.substring("__create_var:".length);
-      if (onCreateEnvVar) {
-        onCreateEnvVar(targetKey, "");
-      }
+    if (!suggestTriggerPos || !urlRef.current) return;
+    const selected = suggestions[index];
+    const key = selected.startsWith("__create_var:") ? selected.slice("__create_var:".length) : selected;
+    if (selected.startsWith("__create_var:")) {
+      onCreateEnvVar?.(key, "");
     }
 
-    const before = val.substring(0, suggestTriggerPos.start);
-    
-    // Swallow any closing brackets that exist after the start index to prevent duplicates
-    let after = val.substring(suggestTriggerPos.end);
-    const nextCloseIdx = val.indexOf("}}", suggestTriggerPos.start);
-    if (nextCloseIdx !== -1 && nextCloseIdx >= suggestTriggerPos.start) {
-      after = val.substring(nextCloseIdx + 2);
-    }
-
-    const newVal = `${before}{{${targetKey}}}${after}`;
-
-    handleUrlChange(newVal);
+    const value = request.url;
+    const before = value.slice(0, suggestTriggerPos.start);
+    const nextCloseIndex = value.indexOf("}}", suggestTriggerPos.start);
+    const after = nextCloseIndex >= 0 ? value.slice(nextCloseIndex + 2) : value.slice(suggestTriggerPos.end);
+    const nextValue = `${before}{{${key}}}${after}`;
+    handleUrlChange(nextValue);
     setShowSuggestions(false);
-
-    const input = urlInputRef.current;
     setTimeout(() => {
-      input.focus();
-      const newCursorPos = suggestTriggerPos.start + targetKey.length + 4; // "{{var}}"
-      input.setSelectionRange(newCursorPos, newCursorPos);
-    }, 10);
+      urlRef.current?.focus();
+      const cursor = suggestTriggerPos.start + key.length + 4;
+      urlRef.current?.setSelectionRange(cursor, cursor);
+    }, 0);
   };
 
-  // Ensure initial empty rows
-  const displayParams = ensureTrailingEmptyRow(request.params);
-  const displayHeaders = ensureTrailingEmptyRow(request.headers);
-  const displayUrlencoded = ensureTrailingEmptyRow(request.body.urlencoded || []);
-  const displayFormData = ensureTrailingEmptyRow(request.body.formData || []);
+  const tabs: { id: TabType; label: string; count?: number }[] = [
+    { id: "params", label: "Params", count: request.params.filter((row) => row.enabled && row.key).length },
+    { id: "auth", label: "Auth" },
+    { id: "headers", label: "Headers", count: request.headers.filter((row) => row.enabled && row.key).length },
+    { id: "body", label: "Body" },
+    { id: "scripts", label: "Scripts" }
+  ];
 
-  const methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"] as const;
+  const methods: ClotientRequest["method"][] = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"];
 
   return (
-    <div className="flex-1 flex flex-col bg-gray-900 border-b border-gray-800 overflow-hidden text-sm relative">
-      {/* Top Address & Action Bar */}
-      <div className="p-4 bg-gray-950 flex items-center gap-2 select-none shrink-0 border-b border-gray-850 z-20">
-        
-        {/* Method selector custom dropdown menu */}
-        <div className="relative shrink-0" ref={methodDropdownRef}>
-          <button
-            onClick={() => setShowMethodDropdown(!showMethodDropdown)}
-            className={`font-mono font-bold text-xs uppercase pl-3 pr-8 py-2 bg-gray-900 border border-gray-800 rounded outline-none flex items-center gap-1 cursor-pointer hover:bg-gray-850 transition relative ${
-              request.method === "GET"
-                ? "text-emerald-400"
-                : request.method === "POST"
-                ? "text-indigo-400"
-                : request.method === "PUT"
-                ? "text-amber-400"
-                : request.method === "DELETE"
-                ? "text-red-400"
-                : "text-gray-300"
-            }`}
-          >
-            {request.method}
-            <ChevronDown className="w-3.5 h-3.5 text-gray-500 absolute right-2.5 top-1/2 -translate-y-1/2" />
-          </button>
-          
-          {showMethodDropdown && (
-            <div className="absolute top-full left-0 z-50 mt-1 bg-gray-950 border border-gray-850 rounded shadow-2xl py-1 w-28 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-100">
-              {methods.map((m) => (
-                <div
-                  key={m}
-                  className={`px-3 py-1.5 font-mono text-xs cursor-pointer transition select-none ${
-                    request.method === m
-                      ? "bg-indigo-950/40 text-indigo-400 font-bold"
-                      : m === "GET"
-                      ? "text-emerald-405 hover:bg-gray-900 hover:text-emerald-400"
-                      : m === "POST"
-                      ? "text-indigo-405 hover:bg-gray-900 hover:text-indigo-400"
-                      : m === "PUT"
-                      ? "text-amber-455 hover:bg-gray-900 hover:text-amber-400"
-                      : m === "DELETE"
-                      ? "text-red-455 hover:bg-gray-900 hover:text-red-400"
-                      : "text-gray-400 hover:bg-gray-900 hover:text-gray-200"
-                  }`}
-                  onClick={() => {
-                    updateRequest({ method: m });
-                    setShowMethodDropdown(false);
-                  }}
-                >
-                  {m}
-                </div>
-              ))}
-            </div>
-          )}
+    <section className="h-full min-h-0 min-w-0 overflow-hidden flex flex-col bg-white">
+      <div className="px-5 pt-4 pb-4 border-b border-slate-200">
+        <div className="flex items-center justify-end gap-2 mb-3">
+            <span className="h-9 px-3 rounded-md border border-slate-200 bg-slate-50 text-sm font-semibold text-slate-700 flex items-center gap-2">
+              <span className="h-2 w-2 rounded-full bg-emerald-500" />
+              {activeEnv ? activeEnv.name : "No environment"}
+            </span>
         </div>
 
-        <div className="flex-1 relative">
-          <input
-            type="text"
-            ref={urlInputRef}
-            className="w-full font-mono text-xs px-3 py-2 bg-gray-900 border border-gray-800 rounded outline-none text-gray-200 focus:border-indigo-500 placeholder-gray-650"
-            placeholder="https://api.example.com/endpoint"
-            value={request.url}
-            onChange={(e) => handleUrlInputChange(e.target.value, e.target.selectionStart || 0)}
-            onKeyDown={handleUrlKeyDown}
-            onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
-          />
-
-          {/* Autocomplete Dropdown */}
-          {showSuggestions && suggestions.length > 0 && (
-            <div className="absolute top-full left-0 right-0 z-50 mt-1 bg-[#0e1322] border border-gray-800 rounded shadow-2xl max-h-48 overflow-y-auto animate-in fade-in duration-100">
-              {suggestions.map((s, idx) => {
-                const isCreateRow = s.startsWith("__create_var:");
-                const displayKey = isCreateRow ? s.substring("__create_var:".length) : s;
-
-                return (
-                  <div
-                    key={s}
-                    className={`px-3 py-1.5 text-xs font-mono cursor-pointer transition select-none flex items-center justify-between ${
-                      idx === suggestionIndex
-                        ? "bg-indigo-950 text-indigo-300 font-bold"
-                        : "text-gray-400 hover:bg-gray-900 hover:text-gray-200"
-                    }`}
-                    onMouseDown={(e) => {
-                      e.preventDefault(); // prevent blur
-                      selectSuggestion(idx);
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="relative" ref={methodRef}>
+            <button
+              onClick={() => setShowMethodDropdown((prev) => !prev)}
+              className="h-11 w-[104px] rounded-md border border-slate-200 bg-white flex items-center justify-between px-3 hover:bg-slate-50"
+            >
+              <span className={methodClass(request.method)}>{request.method}</span>
+              <ChevronDown size={15} className="text-slate-400" />
+            </button>
+            {showMethodDropdown && (
+              <div className="absolute z-50 mt-1 w-[124px] rounded-md border border-slate-200 bg-white shadow-xl overflow-hidden">
+                {methods.map((method) => (
+                  <button
+                    key={method}
+                    className="w-full px-3 py-2 text-left hover:bg-slate-50"
+                    onClick={() => {
+                      updateRequest({ method });
+                      setShowMethodDropdown(false);
                     }}
                   >
-                    {isCreateRow ? (
-                      <span className="text-emerald-400 font-semibold flex items-center gap-1">
-                        + Create variable <code className="bg-emerald-950/40 px-1.5 py-0.5 rounded text-emerald-300 font-mono text-[10px]">{`{{${displayKey}}}`}</code>
-                      </span>
-                    ) : (
-                      <>
-                        <span>{`{{${displayKey}}}`}</span>
-                        <span className="text-[10px] text-gray-550 font-sans truncate max-w-xs">
-                          {activeEnv?.variables.find((v) => v.key === displayKey)?.value || ""}
-                        </span>
-                      </>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {loading ? (
-          <button
-            className="px-5 py-2 bg-red-950/40 hover:bg-red-900/50 text-red-400 border border-red-900/30 rounded font-semibold text-xs flex items-center gap-1.5 cursor-pointer transition select-none"
-            onClick={onCancel}
-          >
-            <XCircle className="w-3.5 h-3.5" />
-            Cancel
-          </button>
-        ) : (
-          <button
-            className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded font-medium text-xs flex items-center gap-1.5 cursor-pointer transition select-none disabled:opacity-50"
-            onClick={onSend}
-            disabled={loading}
-          >
-            <Send className="w-3.5 h-3.5" />
-            Send
-          </button>
-        )}
-
-        <button
-          className="p-2 bg-gray-850 hover:bg-gray-800 text-gray-400 hover:text-white rounded border border-gray-700 transition cursor-pointer"
-          title="Generate Request Snippet"
-          onClick={onGenerateCode}
-        >
-          <Code className="w-4 h-4" />
-        </button>
-      </div>
-
-      {/* Tabs list */}
-      <div className="flex border-b border-gray-800 bg-[#0e1322]/30 px-4 select-none shrink-0">
-        <button
-          className={`py-2 px-4 text-xs font-semibold border-b-2 transition cursor-pointer ${
-            activeTab === "params" ? "border-indigo-500 text-indigo-400 bg-gray-900/10" : "border-transparent text-gray-550 hover:text-gray-350"
-          }`}
-          onClick={() => setActiveTab("params")}
-        >
-          Params
-        </button>
-        <button
-          className={`py-2 px-4 text-xs font-semibold border-b-2 transition cursor-pointer ${
-            activeTab === "headers" ? "border-indigo-500 text-indigo-400 bg-gray-900/10" : "border-transparent text-gray-550 hover:text-gray-350"
-          }`}
-          onClick={() => setActiveTab("headers")}
-        >
-          Headers
-        </button>
-        <button
-          className={`py-2 px-4 text-xs font-semibold border-b-2 transition cursor-pointer ${
-            activeTab === "body" ? "border-indigo-500 text-indigo-400 bg-gray-900/10" : "border-transparent text-gray-550 hover:text-gray-350"
-          }`}
-          onClick={() => setActiveTab("body")}
-        >
-          Body
-        </button>
-        <button
-          className={`py-2 px-4 text-xs font-semibold border-b-2 transition cursor-pointer ${
-            activeTab === "auth" ? "border-indigo-500 text-indigo-400 bg-gray-900/10" : "border-transparent text-gray-550 hover:text-gray-350"
-          }`}
-          onClick={() => setActiveTab("auth")}
-        >
-          Auth
-        </button>
-        <button
-          className={`py-2 px-4 text-xs font-semibold border-b-2 transition cursor-pointer ${
-            activeTab === "scripts" ? "border-indigo-500 text-indigo-400 bg-gray-900/10" : "border-transparent text-gray-550 hover:text-gray-350"
-          }`}
-          onClick={() => setActiveTab("scripts")}
-        >
-          Scripts
-        </button>
-      </div>
-
-      {/* Tab Panel Body */}
-      <div className="flex-1 overflow-y-auto p-4 bg-gray-905/50">
-        {/* PARAMS TAB */}
-        {activeTab === "params" && (
-          <div className="border border-gray-800 rounded bg-[#0e1322]/80 overflow-hidden">
-            <table className="w-full text-xs border-collapse">
-              <thead className="bg-gray-900 border-b border-gray-800 text-gray-400 uppercase font-semibold select-none">
-                <tr>
-                  <th className="p-2 w-8 text-center">Active</th>
-                  <th className="p-2 w-1/3">Key</th>
-                  <th className="p-2 w-1/3">Value</th>
-                  <th className="p-2 w-1/3">Description</th>
-                  <th className="p-2 w-10 text-center">Del</th>
-                </tr>
-              </thead>
-              <tbody>
-                {displayParams.map((p, idx) => (
-                  <tr key={p.id} className="border-b border-gray-900 hover:bg-gray-900/30">
-                    <td className="p-2 text-center">
-                      <input
-                        type="checkbox"
-                        checked={p.enabled}
-                        onChange={(e) =>
-                          handleKeyValueChange(displayParams, idx, { enabled: e.target.checked }, syncParamsToUrl)
-                        }
-                        className="accent-indigo-500 cursor-pointer"
-                      />
-                    </td>
-                    <td className="p-2">
-                      <input
-                        type="text"
-                        placeholder="Key"
-                        value={p.key}
-                        onChange={(e) =>
-                          handleKeyValueChange(displayParams, idx, { key: e.target.value }, syncParamsToUrl)
-                        }
-                        className="w-full bg-transparent outline-none text-gray-300 font-mono text-xs"
-                      />
-                    </td>
-                    <td className="p-2">
-                      <input
-                        type="text"
-                        placeholder="Value"
-                        value={p.value}
-                        onChange={(e) =>
-                          handleKeyValueChange(displayParams, idx, { value: e.target.value }, syncParamsToUrl)
-                        }
-                        className="w-full bg-transparent outline-none text-gray-300 font-mono text-xs"
-                      />
-                    </td>
-                    <td className="p-2">
-                      <input
-                        type="text"
-                        placeholder="Description"
-                        value={p.description || ""}
-                        onChange={(e) =>
-                          handleKeyValueChange(displayParams, idx, { description: e.target.value }, syncParamsToUrl)
-                        }
-                        className="w-full bg-transparent outline-none text-gray-300 text-xs"
-                      />
-                    </td>
-                    <td className="p-2 text-center">
-                      {idx < displayParams.length - 1 && (
-                        <button
-                          onClick={() => handleKeyValueDelete(request.params, idx, syncParamsToUrl)}
-                          className="text-gray-500 hover:text-red-400 transition cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
+                    <span className={methodClass(method)}>{method}</span>
+                  </button>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {/* HEADERS TAB */}
-        {activeTab === "headers" && (
-          <div className="border border-gray-800 rounded bg-[#0e1322]/80 overflow-hidden">
-            <table className="w-full text-xs border-collapse">
-              <thead className="bg-gray-900 border-b border-gray-800 text-gray-400 uppercase font-semibold select-none">
-                <tr>
-                  <th className="p-2 w-8 text-center">Active</th>
-                  <th className="p-2 w-1/3">Key</th>
-                  <th className="p-2 w-1/3">Value</th>
-                  <th className="p-2 w-1/3">Description</th>
-                  <th className="p-2 w-10 text-center">Del</th>
-                </tr>
-              </thead>
-              <tbody>
-                {displayHeaders.map((h, idx) => (
-                  <tr key={h.id} className="border-b border-gray-900 hover:bg-gray-900/30">
-                    <td className="p-2 text-center">
-                      <input
-                        type="checkbox"
-                        checked={h.enabled}
-                        onChange={(e) =>
-                          handleKeyValueChange(displayHeaders, idx, { enabled: e.target.checked }, (list) =>
-                            updateRequest({ headers: list })
-                          )
-                        }
-                        className="accent-indigo-500 cursor-pointer"
-                      />
-                    </td>
-                    <td className="p-2">
-                      <input
-                        type="text"
-                        placeholder="Key"
-                        value={h.key}
-                        onChange={(e) =>
-                          handleKeyValueChange(displayHeaders, idx, { key: e.target.value }, (list) =>
-                            updateRequest({ headers: list })
-                          )
-                        }
-                        className="w-full bg-transparent outline-none text-gray-300 font-mono text-xs"
-                      />
-                    </td>
-                    <td className="p-2">
-                      <input
-                        type="text"
-                        placeholder="Value"
-                        value={h.value}
-                        onChange={(e) =>
-                          handleKeyValueChange(displayHeaders, idx, { value: e.target.value }, (list) =>
-                            updateRequest({ headers: list })
-                          )
-                        }
-                        className="w-full bg-transparent outline-none text-gray-300 font-mono text-xs"
-                      />
-                    </td>
-                    <td className="p-2">
-                      <input
-                        type="text"
-                        placeholder="Description"
-                        value={h.description || ""}
-                        onChange={(e) =>
-                          handleKeyValueChange(displayHeaders, idx, { description: e.target.value }, (list) =>
-                            updateRequest({ headers: list })
-                          )
-                        }
-                        className="w-full bg-transparent outline-none text-gray-300 text-xs"
-                      />
-                    </td>
-                    <td className="p-2 text-center">
-                      {idx < displayHeaders.length - 1 && (
-                        <button
-                          onClick={() =>
-                            handleKeyValueDelete(request.headers, idx, (list) => updateRequest({ headers: list }))
-                          }
-                          className="text-gray-500 hover:text-red-400 transition cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {/* BODY TAB */}
-        {activeTab === "body" && (
-          <div className="flex flex-col h-full overflow-hidden">
-            {/* Body Mode Selector */}
-            <div className="flex gap-4 mb-3 text-xs select-none border-b border-gray-800 pb-2">
-              {(["none", "json", "urlencoded", "form-data"] as const).map((mode) => (
-                <label key={mode} className="flex items-center gap-1.5 text-gray-400 hover:text-gray-200 cursor-pointer">
-                  <input
-                    type="radio"
-                    name="body-mode"
-                    checked={bodyTab === mode}
-                    onChange={() => {
-                      setBodyTab(mode);
-                      updateBody({ type: mode });
-                    }}
-                    className="accent-indigo-500"
-                  />
-                  <span className="capitalize">{mode === "urlencoded" ? "x-www-form-urlencoded" : mode}</span>
-                </label>
-              ))}
-            </div>
-
-            {/* Body Content Fields */}
-            {bodyTab === "none" && (
-              <div className="text-center py-8 text-xs text-gray-650">
-                This request does not send a body payload.
-              </div>
-            )}
-
-            {bodyTab === "json" && (
-              <textarea
-                className="w-full h-44 bg-[#0e1322] border border-gray-800 rounded p-3 text-xs font-mono text-gray-350 outline-none focus:border-indigo-500 leading-relaxed resize-y select-text"
-                placeholder='{\n  "key": "value"\n}'
-                value={request.body.rawText || ""}
-                onChange={(e) => updateBody({ rawText: e.target.value })}
-              />
-            )}
-
-            {bodyTab === "urlencoded" && (
-              <div className="border border-gray-800 rounded bg-[#0e1322]/80 overflow-hidden">
-                <table className="w-full text-xs border-collapse">
-                  <thead className="bg-gray-900 border-b border-gray-800 text-gray-400 uppercase font-semibold select-none">
-                    <tr>
-                      <th className="p-2 w-8 text-center">Active</th>
-                      <th className="p-2 w-1/2">Key</th>
-                      <th className="p-2 w-1/2">Value</th>
-                      <th className="p-2 w-10 text-center">Del</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {displayUrlencoded.map((x, idx) => (
-                      <tr key={x.id} className="border-b border-gray-900 hover:bg-gray-900/30">
-                        <td className="p-2 text-center">
-                          <input
-                            type="checkbox"
-                            checked={x.enabled}
-                            onChange={(e) =>
-                              handleKeyValueChange(displayUrlencoded, idx, { enabled: e.target.checked }, (list) =>
-                                updateBody({ urlencoded: list })
-                              )
-                            }
-                            className="accent-indigo-500 cursor-pointer"
-                          />
-                        </td>
-                        <td className="p-2">
-                          <input
-                            type="text"
-                            placeholder="Key"
-                            value={x.key}
-                            onChange={(e) =>
-                              handleKeyValueChange(displayUrlencoded, idx, { key: e.target.value }, (list) =>
-                                updateBody({ urlencoded: list })
-                              )
-                            }
-                            className="w-full bg-transparent outline-none text-gray-300 font-mono text-xs"
-                          />
-                        </td>
-                        <td className="p-2">
-                          <input
-                            type="text"
-                            placeholder="Value"
-                            value={x.value}
-                            onChange={(e) =>
-                              handleKeyValueChange(displayUrlencoded, idx, { value: e.target.value }, (list) =>
-                                updateBody({ urlencoded: list })
-                              )
-                            }
-                            className="w-full bg-transparent outline-none text-gray-300 font-mono text-xs"
-                          />
-                        </td>
-                        <td className="p-2 text-center">
-                          {idx < displayUrlencoded.length - 1 && (
-                            <button
-                              onClick={() =>
-                                handleKeyValueDelete(request.body.urlencoded || [], idx, (list) =>
-                                  updateBody({ urlencoded: list })
-                                )
-                              }
-                              className="text-gray-505 hover:text-red-400 transition cursor-pointer"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {bodyTab === "form-data" && (
-              <div className="border border-gray-800 rounded bg-[#0e1322]/80 overflow-hidden">
-                <table className="w-full text-xs border-collapse">
-                  <thead className="bg-gray-900 border-b border-gray-800 text-gray-400 uppercase font-semibold select-none">
-                    <tr>
-                      <th className="p-2 w-8 text-center">Active</th>
-                      <th className="p-2 w-1/2">Key</th>
-                      <th className="p-2 w-1/2">Value</th>
-                      <th className="p-2 w-10 text-center">Del</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {displayFormData.map((x, idx) => (
-                      <tr key={x.id} className="border-b border-gray-900 hover:bg-gray-900/30">
-                        <td className="p-2 text-center">
-                          <input
-                            type="checkbox"
-                            checked={x.enabled}
-                            onChange={(e) =>
-                              handleKeyValueChange(displayFormData, idx, { enabled: e.target.checked }, (list) =>
-                                updateBody({ formData: list })
-                              )
-                            }
-                            className="accent-indigo-500 cursor-pointer"
-                          />
-                        </td>
-                        <td className="p-2">
-                          <input
-                            type="text"
-                            placeholder="Key"
-                            value={x.key}
-                            onChange={(e) =>
-                              handleKeyValueChange(displayFormData, idx, { key: e.target.value }, (list) =>
-                                updateBody({ formData: list })
-                              )
-                            }
-                            className="w-full bg-transparent outline-none text-gray-300 font-mono text-xs"
-                          />
-                        </td>
-                        <td className="p-2">
-                          <input
-                            type="text"
-                            placeholder="Value"
-                            value={x.value}
-                            onChange={(e) =>
-                              handleKeyValueChange(displayFormData, idx, { value: e.target.value }, (list) =>
-                                updateBody({ formData: list })
-                              )
-                            }
-                            className="w-full bg-transparent outline-none text-gray-300 font-mono text-xs"
-                          />
-                        </td>
-                        <td className="p-2 text-center">
-                          {idx < displayFormData.length - 1 && (
-                            <button
-                              onClick={() =>
-                                handleKeyValueDelete(request.body.formData || [], idx, (list) =>
-                                  updateBody({ formData: list })
-                                )
-                              }
-                              className="text-gray-505 hover:text-red-400 transition cursor-pointer"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
               </div>
             )}
           </div>
-        )}
 
-        {/* AUTH TAB */}
-        {activeTab === "auth" && (
-          <div className="space-y-4 max-w-lg">
-            {/* Custom dropdown menu select wrapper for Auth selector */}
-            <div className="flex flex-col gap-1.5 select-none relative w-full" ref={authDropdownRef}>
-              <label className="text-xs text-gray-400 font-medium">Auth Type</label>
-              <div className="relative">
-                <button
-                  onClick={() => setShowAuthDropdown(!showAuthDropdown)}
-                  className="bg-gray-950 border border-gray-800 text-gray-300 rounded pl-3 pr-8 py-1.5 w-full text-xs outline-none text-left flex items-center justify-between hover:bg-gray-900 transition cursor-pointer"
-                >
-                  <span>
-                    {request.auth.type === "none"
-                      ? "No Auth"
-                      : request.auth.type === "bearer"
-                      ? "Bearer Token"
-                      : "Basic Auth"}
-                  </span>
-                  <ChevronDown className="w-3.5 h-3.5 text-gray-500 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                </button>
-                
-                {showAuthDropdown && (
-                  <div className="absolute top-full left-0 right-0 z-50 mt-1 bg-[#0e1322] border border-gray-850 rounded shadow-2xl py-1 overflow-hidden animate-in fade-in slide-in-from-top-1 duration-100">
-                    {(["none", "bearer", "basic"] as const).map((type) => (
-                      <div
-                        key={type}
-                        className={`px-3 py-1.5 text-xs cursor-pointer transition select-none ${
-                          request.auth.type === type
-                            ? "bg-indigo-955/50 text-indigo-400 font-bold"
-                            : "text-gray-400 hover:bg-gray-900 hover:text-gray-205"
-                        }`}
-                        onClick={() => {
-                          updateRequest({
-                            auth: { ...request.auth, type }
-                          });
-                          setShowAuthDropdown(false);
-                        }}
-                      >
-                        {type === "none" ? "No Auth" : type === "bearer" ? "Bearer Token" : "Basic Auth"}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {request.auth.type === "bearer" && (
-              <div className="flex flex-col gap-1.5 select-text">
-                <label className="text-xs text-gray-400 font-medium">Token</label>
-                <input
-                  type="text"
-                  placeholder="Bearer Token value"
-                  className="bg-[#0e1322] border border-gray-800 text-gray-300 rounded px-3 py-1.5 text-xs outline-none focus:border-indigo-550 font-mono"
-                  value={request.auth.bearerToken || ""}
-                  onChange={(e) =>
-                    updateRequest({
-                      auth: { ...request.auth, bearerToken: e.target.value }
-                    })
+          <div className="relative flex-1 min-w-0">
+            <input
+              ref={urlRef}
+              value={request.url}
+              onChange={(event) => handleUrlInput(event.target.value, event.target.selectionStart || 0)}
+              onKeyDown={(event) => {
+                if (showSuggestions) {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    setSuggestionIndex((prev) => (prev + 1) % suggestions.length);
+                  } else if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    setSuggestionIndex((prev) => (prev - 1 + suggestions.length) % suggestions.length);
+                  } else if (event.key === "Enter" || event.key === "Tab") {
+                    event.preventDefault();
+                    selectSuggestion(suggestionIndex);
+                  } else if (event.key === "Escape") {
+                    setShowSuggestions(false);
                   }
-                />
+                } else if (event.key === "Enter" && !loading) {
+                  onSend();
+                }
+              }}
+              onBlur={() => setTimeout(() => setShowSuggestions(false), 160)}
+              placeholder="https://api.example.com/v1/users"
+              className="w-full h-11 rounded-md border border-slate-200 bg-white px-4 text-[13px] font-mono text-slate-800 outline-none focus:border-blue-400 focus:ring-4 focus:ring-blue-100"
+            />
+            {showSuggestions && suggestions.length > 0 && (
+              <div className="absolute z-50 left-0 right-0 top-[48px] rounded-md border border-slate-200 bg-white shadow-xl overflow-hidden">
+                {suggestions.map((suggestion, index) => {
+                  const create = suggestion.startsWith("__create_var:");
+                  const key = create ? suggestion.slice("__create_var:".length) : suggestion;
+                  return (
+                    <button
+                      key={suggestion}
+                      className={`w-full px-3 py-2 text-left text-xs flex items-center justify-between ${
+                        index === suggestionIndex ? "bg-blue-50 text-blue-700" : "hover:bg-slate-50 text-slate-700"
+                      }`}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        selectSuggestion(index);
+                      }}
+                    >
+                      <span className="font-mono">{create ? `Create {{${key}}}` : `{{${key}}}`}</span>
+                      {!create && <span className="truncate text-slate-400 max-w-[240px]">{activeEnv?.variables.find((v) => v.key === key)?.value}</span>}
+                    </button>
+                  );
+                })}
               </div>
             )}
+          </div>
 
+          {loading ? (
+            <button className="h-11 px-5 rounded-md border border-red-200 bg-red-50 text-red-700 font-semibold text-sm flex items-center gap-2" onClick={onCancel}>
+              <StopCircle size={16} /> Cancel
+            </button>
+          ) : (
+            <button className="ct-primary h-11 px-6 flex items-center gap-2" onClick={onSend}>
+              <Send size={16} /> Send
+            </button>
+          )}
+          <button
+            className={`ct-secondary h-11 px-4 flex items-center gap-2 ${saveStatus === "error" ? "ct-save-error" : saveStatus === "saved" ? "ct-save-ok" : ""}`}
+            title={saveMessage}
+            onClick={onSave}
+            disabled={saveStatus === "saving"}
+          >
+            {saveStatus === "saved" ? <CheckCircle2 size={15} /> : <Save size={15} />}
+            {saveStatus === "saving" ? "Saving..." : saveStatus === "error" ? "Failed" : saveStatus === "saved" ? "Saved" : "Save"}
+          </button>
+          <button className="ct-icon-button !h-11 !w-11" title="Generate code" onClick={onGenerateCode}>
+            <Code2 size={16} />
+          </button>
+        </div>
+      </div>
+
+      <div className="px-5 h-12 border-b border-slate-200 flex items-end gap-6">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`h-12 border-b-2 text-sm font-semibold flex items-center gap-2 ${
+              activeTab === tab.id ? "border-blue-500 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-800"
+            }`}
+          >
+            {tab.label}
+            {tab.count !== undefined && tab.count > 0 && (
+              <span className="min-w-5 h-5 px-1.5 rounded-full bg-slate-100 text-[11px] text-slate-600 flex items-center justify-center">
+                {tab.count}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-5 bg-slate-50/60">
+        {activeTab === "params" && (
+          <KeyValueTable
+            rows={withTrailingRow(request.params)}
+            showDescription
+            onChange={(index, fields) => updateKeyValue(withTrailingRow(request.params), index, fields, syncParamsToUrl)}
+            onDelete={(index) => deleteKeyValue(request.params, index, syncParamsToUrl)}
+          />
+        )}
+
+        {activeTab === "headers" && (
+          <KeyValueTable
+            rows={withTrailingRow(request.headers)}
+            showDescription
+            onChange={(index, fields) => updateKeyValue(withTrailingRow(request.headers), index, fields, (rows) => updateRequest({ headers: rows }))}
+            onDelete={(index) => deleteKeyValue(request.headers, index, (rows) => updateRequest({ headers: rows }))}
+          />
+        )}
+
+        {activeTab === "auth" && (
+          <div className="ct-panel p-4 space-y-4">
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wide text-slate-400 mb-1">Type</label>
+              <select
+                value={request.auth.type}
+                onChange={(event) => updateRequest({ auth: { type: event.target.value as ClotientRequest["auth"]["type"] } })}
+                className="h-9 rounded-md border border-slate-200 bg-white px-3 text-sm outline-none focus:border-blue-400"
+              >
+                <option value="none">No Auth</option>
+                <option value="bearer">Bearer Token</option>
+                <option value="basic">Basic Auth</option>
+              </select>
+            </div>
+            {request.auth.type === "bearer" && (
+              <Field label="Bearer token">
+                <input
+                  value={request.auth.bearerToken || ""}
+                  onChange={(event) => updateRequest({ auth: { ...request.auth, bearerToken: event.target.value } })}
+                  placeholder="{{token}}"
+                  className="w-full h-9 rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-400 font-mono"
+                />
+              </Field>
+            )}
             {request.auth.type === "basic" && (
-              <div className="grid grid-cols-2 gap-3 select-text">
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-xs text-gray-400 font-medium">Username</label>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Username">
                   <input
-                    type="text"
-                    placeholder="Username"
-                    className="bg-[#0e1322] border border-gray-800 text-gray-300 rounded px-3 py-1.5 text-xs outline-none focus:border-indigo-555 font-mono"
                     value={request.auth.basicUsername || ""}
-                    onChange={(e) =>
-                      updateRequest({
-                        auth: { ...request.auth, basicUsername: e.target.value }
-                      })
-                    }
+                    onChange={(event) => updateRequest({ auth: { ...request.auth, basicUsername: event.target.value } })}
+                    className="w-full h-9 rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-400"
                   />
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-xs text-gray-400 font-medium">Password</label>
+                </Field>
+                <Field label="Password">
                   <input
                     type="password"
-                    placeholder="Password"
-                    className="bg-[#0e1322] border border-gray-800 text-gray-300 rounded px-3 py-1.5 text-xs outline-none focus:border-indigo-555 font-mono"
                     value={request.auth.basicPassword || ""}
-                    onChange={(e) =>
-                      updateRequest({
-                        auth: { ...request.auth, basicPassword: e.target.value }
-                      })
-                    }
+                    onChange={(event) => updateRequest({ auth: { ...request.auth, basicPassword: event.target.value } })}
+                    className="w-full h-9 rounded-md border border-slate-200 px-3 text-sm outline-none focus:border-blue-400"
                   />
-                </div>
+                </Field>
               </div>
             )}
           </div>
         )}
 
-        {/* SCRIPTS TAB */}
+        {activeTab === "body" && (
+          <div className="space-y-3">
+            <div className="ct-panel p-1 inline-flex gap-1">
+              {(["none", "json", "raw", "urlencoded", "form-data"] as BodyType[]).map((mode) => (
+                <button
+                  key={mode}
+                  onClick={() => {
+                    setBodyTab(mode);
+                    updateBody({ type: mode });
+                  }}
+                  className={`h-8 px-3 rounded-md text-xs font-semibold ${
+                    bodyTab === mode ? "bg-blue-50 text-blue-700" : "text-slate-500 hover:bg-slate-50"
+                  }`}
+                >
+                  {mode === "urlencoded" ? "x-www-form-urlencoded" : mode}
+                </button>
+              ))}
+            </div>
+            {bodyTab === "none" && <EmptyPanel text="This request does not send a body." />}
+            {(bodyTab === "json" || bodyTab === "raw") && (
+              <textarea
+                value={request.body.rawText || ""}
+                onChange={(event) => updateBody({ rawText: event.target.value })}
+                placeholder={bodyTab === "json" ? '{\n  "name": "Jane"\n}' : "Raw body"}
+                className="w-full min-h-[280px] ct-panel p-4 resize-y font-mono text-sm text-slate-800 outline-none focus:border-blue-400"
+              />
+            )}
+            {bodyTab === "urlencoded" && (
+              <KeyValueTable
+                rows={withTrailingRow(request.body.urlencoded || [])}
+                onChange={(index, fields) => updateKeyValue(withTrailingRow(request.body.urlencoded || []), index, fields, (rows) => updateBody({ urlencoded: rows }))}
+                onDelete={(index) => deleteKeyValue(request.body.urlencoded || [], index, (rows) => updateBody({ urlencoded: rows }))}
+              />
+            )}
+            {bodyTab === "form-data" && (
+              <KeyValueTable
+                rows={withTrailingRow(request.body.formData || [])}
+                onChange={(index, fields) => updateKeyValue(withTrailingRow(request.body.formData || []), index, fields, (rows) => updateBody({ formData: rows }))}
+                onDelete={(index) => deleteKeyValue(request.body.formData || [], index, (rows) => updateBody({ formData: rows }))}
+              />
+            )}
+          </div>
+        )}
+
         {activeTab === "scripts" && (
-          <div className="flex flex-col h-full overflow-hidden select-none">
-            {/* Sub Tabs */}
-            <div className="flex border-b border-gray-800 mb-3 bg-[#0e1322]/20 rounded-t">
+          <div className="space-y-3">
+            <div className="ct-panel p-1 inline-flex gap-1">
               <button
-                className={`py-1.5 px-3 text-xs font-semibold border-b-2 transition cursor-pointer ${
-                  scriptSubTab === "pre" ? "border-cyan-400 text-cyan-400" : "border-transparent text-gray-550 hover:text-gray-350"
-                }`}
-                onClick={() => setScriptSubTab("pre")}
+                onClick={() => setScriptTab("pre")}
+                className={`h-8 px-3 rounded-md text-xs font-semibold ${scriptTab === "pre" ? "bg-blue-50 text-blue-700" : "text-slate-500 hover:bg-slate-50"}`}
               >
-                Pre-request Script (cs.env.*)
+                Pre-request
               </button>
               <button
-                className={`py-1.5 px-3 text-xs font-semibold border-b-2 transition cursor-pointer ${
-                  scriptSubTab === "post" ? "border-cyan-400 text-cyan-400" : "border-transparent text-gray-555 hover:text-gray-350"
-                }`}
-                onClick={() => setScriptSubTab("post")}
+                onClick={() => setScriptTab("post")}
+                className={`h-8 px-3 rounded-md text-xs font-semibold ${scriptTab === "post" ? "bg-blue-50 text-blue-700" : "text-slate-500 hover:bg-slate-50"}`}
               >
-                Post-request Script (cs.response.*)
+                Tests
               </button>
             </div>
-
-            {/* Script Textareas */}
-            {scriptSubTab === "pre" ? (
-              <div className="flex flex-col gap-2">
-                <textarea
-                  className="w-full h-40 bg-[#0e1322] border border-gray-800 rounded p-3 text-xs font-mono text-gray-350 outline-none focus:border-indigo-500 leading-relaxed resize-y select-text"
-                  placeholder='// Run before request goes out. Modify variables or add headers:\ncs.env.set("api_key", "secret123");\ncs.request.headers.add("X-Custom", "added-by-script");\ncs.log("Pre-request script fired!");'
-                  value={request.scripts.preRequest}
-                  onChange={(e) =>
-                    updateRequest({
-                      scripts: { ...request.scripts, preRequest: e.target.value }
-                    })
-                  }
-                />
-                <span className="text-[10px] text-gray-555 leading-relaxed">
-                  Namespace <strong>cs</strong> is exposed. Available methods: <code>cs.env.get(k)</code>, <code>cs.env.set(k, v)</code>, <code>cs.request.headers.add(k, v)</code>, <code>cs.request.headers.remove(k)</code>.
-                </span>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <textarea
-                  className="w-full h-40 bg-[#0e1322] border border-gray-800 rounded p-3 text-xs font-mono text-gray-350 outline-none focus:border-indigo-500 leading-relaxed resize-y select-text"
-                  placeholder='// Run after response arrives. Inspect data and run tests:\ncs.log("Status received: " + cs.response.status);\n\ncs.assert(cs.response.status === 200, "Should return 200 status code");\nconst json = cs.response.json();\ncs.assert(json.url === "https://httpbin.org/get", "Verify URL matches");'
-                  value={request.scripts.postRequest}
-                  onChange={(e) =>
-                    updateRequest({
-                      scripts: { ...request.scripts, postRequest: e.target.value }
-                    })
-                  }
-                />
-                <span className="text-[10px] text-gray-555 leading-relaxed">
-                  Namespace <strong>cs</strong> is exposed. Available methods: <code>cs.response.status</code>, <code>cs.response.json()</code>, <code>cs.response.text()</code>, <code>cs.assert(condition, desc)</code>, <code>cs.log(...)</code>.
-                </span>
-              </div>
-            )}
+            <textarea
+              value={scriptTab === "pre" ? request.scripts.preRequest : request.scripts.postRequest}
+              onChange={(event) =>
+                updateRequest({
+                  scripts:
+                    scriptTab === "pre"
+                      ? { ...request.scripts, preRequest: event.target.value }
+                      : { ...request.scripts, postRequest: event.target.value }
+                })
+              }
+              placeholder={scriptTab === "pre" ? 'cs.log("Preparing request");' : 'cs.assert(cs.response.status === 200, "Status is OK");'}
+              className="w-full min-h-[300px] ct-panel p-4 resize-y font-mono text-sm text-slate-800 outline-none focus:border-blue-400"
+            />
           </div>
         )}
       </div>
+    </section>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <span className="block text-xs font-bold uppercase tracking-wide text-slate-400 mb-1">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function EmptyPanel({ text }: { text: string }) {
+  return (
+    <div className="ct-panel h-40 flex items-center justify-center text-sm text-slate-500">
+      {text}
+    </div>
+  );
+}
+
+function KeyValueTable({
+  rows,
+  showDescription,
+  onChange,
+  onDelete
+}: {
+  rows: KeyValue[];
+  showDescription?: boolean;
+  onChange: (index: number, fields: Partial<KeyValue>) => void;
+  onDelete: (index: number) => void;
+}) {
+  return (
+    <div className="ct-panel overflow-x-auto">
+      <table className="w-full min-w-[640px] text-sm">
+        <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-400">
+          <tr>
+            <th className="w-11 p-2 text-center">On</th>
+            <th className="p-2 text-left">Key</th>
+            <th className="p-2 text-left">Value</th>
+            {showDescription && <th className="p-2 text-left">Description</th>}
+            <th className="w-10 p-2" />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => {
+            const isLast = index === rows.length - 1;
+            return (
+              <tr key={row.id} className="border-t border-slate-100 hover:bg-slate-50/60">
+                <td className="p-2 text-center">
+                  <input
+                    type="checkbox"
+                    checked={row.enabled}
+                    onChange={(event) => onChange(index, { enabled: event.target.checked })}
+                  />
+                </td>
+                <td className="p-2">
+                  <input
+                    value={row.key}
+                    onChange={(event) => onChange(index, { key: event.target.value })}
+                    placeholder="Key"
+                    className="w-full bg-transparent outline-none font-mono text-xs text-slate-800"
+                  />
+                </td>
+                <td className="p-2">
+                  <input
+                    value={row.value}
+                    onChange={(event) => onChange(index, { value: event.target.value })}
+                    placeholder="Value"
+                    className="w-full bg-transparent outline-none font-mono text-xs text-slate-700"
+                  />
+                </td>
+                {showDescription && (
+                  <td className="p-2">
+                    <input
+                      value={row.description || ""}
+                      onChange={(event) => onChange(index, { description: event.target.value })}
+                      placeholder="Description"
+                      className="w-full bg-transparent outline-none text-xs text-slate-600"
+                    />
+                  </td>
+                )}
+                <td className="p-2 text-center">
+                  {!isLast && (
+                    <button className="text-slate-400 hover:text-red-600" onClick={() => onDelete(index)}>
+                      <Trash2 size={14} />
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
