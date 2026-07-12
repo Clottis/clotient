@@ -6,7 +6,7 @@ interface RequestBuilderProps {
   request: ClotientRequest;
   onChange: (req: ClotientRequest) => void;
   onSave: () => void;
-  saveStatus: "idle" | "saving" | "saved" | "error";
+  saveStatus: "idle" | "dirty" | "saving" | "saved" | "error";
   saveMessage: string;
   onSend: () => void;
   onGenerateCode: () => void;
@@ -280,13 +280,15 @@ export default function RequestBuilder({
             </button>
           )}
           <button
-            className={`ct-secondary h-11 px-4 flex items-center gap-2 ${saveStatus === "error" ? "ct-save-error" : saveStatus === "saved" ? "ct-save-ok" : ""}`}
+            className={`ct-secondary h-11 px-4 flex items-center gap-2 ${
+              saveStatus === "error" ? "ct-save-error" : saveStatus === "saved" ? "ct-save-ok" : saveStatus === "dirty" ? "ct-save-dirty" : ""
+            }`}
             title={saveMessage}
             onClick={onSave}
             disabled={saveStatus === "saving"}
           >
             {saveStatus === "saved" ? <CheckCircle2 size={15} /> : <Save size={15} />}
-            {saveStatus === "saving" ? "Saving..." : saveStatus === "error" ? "Failed" : saveStatus === "saved" ? "Saved" : "Save"}
+            {saveStatus === "saving" ? "Saving..." : saveStatus === "error" ? "Failed" : saveStatus === "saved" ? "Saved" : saveStatus === "dirty" ? "Unsaved" : "Save"}
           </button>
           <button className="ct-icon-button !h-11 !w-11" title="Generate code" onClick={onGenerateCode}>
             <Code2 size={16} />

@@ -150,6 +150,15 @@ fn save_data(app: tauri::AppHandle, file_name: String, content: String) -> Resul
     Ok(())
 }
 
+#[tauri::command]
+fn clear_local_storage(app: tauri::AppHandle) -> Result<(), String> {
+    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    if config_dir.exists() {
+        fs::remove_dir_all(&config_dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -157,7 +166,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             send_http_request,
             load_data,
-            save_data
+            save_data,
+            clear_local_storage
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

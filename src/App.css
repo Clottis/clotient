@@ -66,6 +66,32 @@ button {
   max-width: 380px;
 }
 
+.ct-sidebar.collapsed {
+  min-width: 56px;
+  max-width: 56px;
+}
+
+.ct-side-collapse-button,
+.ct-side-rail-button {
+  height: 32px;
+  width: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #dce3ee;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #64748b;
+  transition: 120ms ease;
+}
+
+.ct-side-collapse-button:hover,
+.ct-side-rail-button:hover {
+  border-color: #bcd0ee;
+  color: #145fc6;
+  background: #f7fbff;
+}
+
 .ct-main {
   min-width: 0;
   flex: 1;
@@ -112,6 +138,16 @@ button {
   font-size: 13px;
   font-weight: 650;
   box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.ct-request-tab[draggable="true"] {
+  cursor: grab;
+}
+
+.ct-request-tab.dragging {
+  opacity: 0.55;
+  border-style: dashed;
+  cursor: grabbing;
 }
 
 .ct-request-tab.active {
@@ -304,6 +340,53 @@ button {
   background: #fbfcfe;
 }
 
+.ct-response-pane.collapsed {
+  background: #ffffff;
+}
+
+.ct-response-collapse-button {
+  position: absolute;
+  z-index: 35;
+  top: 14px;
+  left: 10px;
+  height: 32px;
+  width: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #dce3ee;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #64748b;
+  box-shadow: 0 8px 20px rgba(16, 24, 40, 0.08);
+}
+
+.ct-response-collapse-button:hover {
+  border-color: #bcd0ee;
+  color: #145fc6;
+  background: #f7fbff;
+}
+
+.ct-response-rail {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding-top: 14px;
+  color: #64748b;
+}
+
+.ct-response-rail span {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
 .ct-response-compact .ct-response-summary {
   padding-top: 12px;
   padding-bottom: 10px;
@@ -489,6 +572,12 @@ button {
   border-color: #b7e5cc;
   color: #047857;
   background: #f0fdf4;
+}
+
+.ct-save-dirty {
+  border-color: #fde68a;
+  color: #92400e;
+  background: #fffbeb;
 }
 
 .ct-save-error {
@@ -729,6 +818,66 @@ button {
   font-weight: 800;
 }
 
+.ct-sidebar-menu-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.ct-sidebar-menu {
+  position: absolute;
+  top: 24px;
+  right: 0;
+  z-index: 45;
+  width: 220px;
+  padding: 6px;
+  border: 1px solid #dce3ee;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 48px rgba(16, 24, 40, 0.18);
+}
+
+.ct-sidebar-menu button {
+  width: 100%;
+  min-height: 32px;
+  padding: 7px 9px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ct-sidebar-menu button:hover {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.ct-sidebar-menu button.danger:hover {
+  background: #fff1f2;
+  color: #e11d48;
+}
+
+.ct-sidebar-menu-label {
+  margin: 5px 4px 3px;
+  padding-top: 6px;
+  border-top: 1px solid #eef2f7;
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ct-code-modal {
   width: min(860px, calc(100vw - 48px));
   height: min(560px, calc(100vh - 72px));
@@ -799,6 +948,12 @@ button {
   color: #047857;
 }
 
+.ct-save-state.dirty {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+}
+
 .ct-save-state.error {
   border-color: #fecaca;
   background: #fff5f5;
@@ -809,6 +964,52 @@ button {
   border-color: #bfdbfe;
   background: #eff6ff;
   color: #1d4ed8;
+}
+
+.ct-save-toast {
+  position: fixed;
+  z-index: 180;
+  right: 24px;
+  bottom: 24px;
+  min-width: 260px;
+  max-width: min(380px, calc(100vw - 48px));
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid #dce3ee;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #334155;
+  box-shadow: 0 18px 48px rgba(16, 24, 40, 0.18);
+}
+
+.ct-save-toast strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.ct-save-toast span {
+  display: block;
+  margin-top: 2px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.ct-save-toast.saved {
+  border-color: #bbf7d0;
+  color: #047857;
+}
+
+.ct-save-toast.saving {
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
+
+.ct-save-toast.error {
+  border-color: #fecaca;
+  color: #b91c1c;
 }
 
 .ct-settings-actions {

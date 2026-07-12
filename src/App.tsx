@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Code2, Database, Plus, RotateCcw, Search, Settings, Trash2, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Code2, Database, Plus, RotateCcw, Search, Settings, Trash2, X } from "lucide-react";
 import packageJson from "../package.json";
 import "./App.css";
 import Sidebar from "./components/Sidebar";
@@ -21,8 +21,10 @@ const hasTauriRuntime = () => typeof window !== "undefined" && Boolean((window a
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const SIDEBAR_MIN = 245;
 const SIDEBAR_MAX = 380;
+const SIDEBAR_COLLAPSED_WIDTH = 56;
 const RESPONSE_MIN = 420;
 const RESPONSE_MAX = 760;
+const RESPONSE_COLLAPSED_WIDTH = 48;
 const BUILDER_MIN = 560;
 const CONSOLE_MIN = 96;
 const CONSOLE_MAX = 280;
@@ -30,6 +32,12 @@ const readStoredNumber = (key: string, fallback: number) => {
   if (typeof window === "undefined") return fallback;
   const value = Number(localStorage.getItem(storageKey(key)));
   return Number.isFinite(value) ? value : fallback;
+};
+const readStoredBool = (key: string, fallback: boolean) => {
+  if (typeof window === "undefined") return fallback;
+  const value = localStorage.getItem(storageKey(key));
+  if (value === null) return fallback;
+  return value === "true";
 };
 
 interface LocalHttpRequest {
@@ -60,7 +68,7 @@ interface AppSettings {
 }
 
 interface SaveNotice {
-  type: "idle" | "saving" | "saved" | "error";
+  type: "idle" | "dirty" | "saving" | "saved" | "error";
   message: string;
   detail?: string;
 }
@@ -85,6 +93,23 @@ async function saveAppData(fileName: string, content: string) {
     return;
   }
   localStorage.setItem(storageKey(fileName), content);
+}
+
+async function clearAppDataStorage() {
+  if (hasTauriRuntime()) {
+    await invoke("clear_local_storage");
+  }
+  Object.keys(localStorage)
+    .filter((key) => key.startsWith("clotient:"))
+    .forEach((key) => localStorage.removeItem(key));
+  if ("caches" in window) {
+    const cacheNames = await window.caches.keys();
+    await Promise.all(
+      cacheNames
+        .filter((name) => name.toLowerCase().includes("clotient"))
+        .map((name) => window.caches.delete(name))
+    );
+  }
 }
 
 async function sendHttpRequest(req: LocalHttpRequest): Promise<LocalHttpResponse> {
@@ -413,9 +438,13 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [saveNotice, setSaveNotice] = useState<SaveNotice>({ type: "idle", message: "All changes local" });
+  const [saveToast, setSaveToast] = useState<SaveNotice | null>(null);
+  const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => clamp(readStoredNumber("layout:sidebarWidth", 305), SIDEBAR_MIN, SIDEBAR_MAX));
   const [responseWidth, setResponseWidth] = useState(() => clamp(readStoredNumber("layout:responseWidth", 610), RESPONSE_MIN, RESPONSE_MAX));
   const [consoleHeight, setConsoleHeight] = useState(() => clamp(readStoredNumber("layout:consoleHeight", 150), CONSOLE_MIN, CONSOLE_MAX));
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStoredBool("layout:sidebarCollapsed", false));
+  const [responseCollapsed, setResponseCollapsed] = useState(() => readStoredBool("layout:responseCollapsed", false));
 
   // App load states
   const [loadingApp, setLoadingApp] = useState(true);
@@ -431,6 +460,8 @@ export default function App() {
   // Cancellation reference
   const activeRequestId = useRef<string | null>(null);
   const mainRef = useRef<HTMLDivElement | null>(null);
+  const saveToastTimer = useRef<number | null>(null);
+  const autoSaveSeen = useRef({ collections: false, environments: false, history: false });
 
   // App-level Custom prompt dialog modal
   const [promptOpen, setPromptOpen] = useState(false);
@@ -515,8 +546,15 @@ export default function App() {
 
   // 2. Auto-save changes to disk on data modifications
   useEffect(() => {
-    if (!loaded || !settings.autoSave) return;
-    async function saveData() {
+    if (!loaded) return;
+    if (!autoSaveSeen.current.collections) {
+      autoSaveSeen.current.collections = true;
+      return;
+    }
+    setSaveNotice({ type: "dirty", message: "Unsaved changes" });
+    if (!settings.autoSave) return;
+    const timer = window.setTimeout(async () => {
+      setSaveNotice({ type: "saving", message: "Auto-saving..." });
       try {
         await saveAppData("collections.json", JSON.stringify(collections));
         setSaveNotice({ type: "saved", message: "Auto-saved locally" });
@@ -524,13 +562,20 @@ export default function App() {
         console.error("Save collections failed", e);
         setSaveNotice({ type: "error", message: "Auto-save failed", detail: e instanceof Error ? e.message : String(e) });
       }
-    }
-    saveData();
+    }, 700);
+    return () => window.clearTimeout(timer);
   }, [collections, loaded, settings.autoSave]);
 
   useEffect(() => {
-    if (!loaded || !settings.autoSave) return;
-    async function saveData() {
+    if (!loaded) return;
+    if (!autoSaveSeen.current.environments) {
+      autoSaveSeen.current.environments = true;
+      return;
+    }
+    setSaveNotice({ type: "dirty", message: "Unsaved changes" });
+    if (!settings.autoSave) return;
+    const timer = window.setTimeout(async () => {
+      setSaveNotice({ type: "saving", message: "Auto-saving..." });
       try {
         await saveAppData("environments.json", JSON.stringify(environments));
         setSaveNotice({ type: "saved", message: "Auto-saved locally" });
@@ -538,13 +583,20 @@ export default function App() {
         console.error("Save environments failed", e);
         setSaveNotice({ type: "error", message: "Auto-save failed", detail: e instanceof Error ? e.message : String(e) });
       }
-    }
-    saveData();
+    }, 700);
+    return () => window.clearTimeout(timer);
   }, [environments, loaded, settings.autoSave]);
 
   useEffect(() => {
-    if (!loaded || !settings.autoSave) return;
-    async function saveData() {
+    if (!loaded) return;
+    if (!autoSaveSeen.current.history) {
+      autoSaveSeen.current.history = true;
+      return;
+    }
+    setSaveNotice({ type: "dirty", message: "Unsaved changes" });
+    if (!settings.autoSave) return;
+    const timer = window.setTimeout(async () => {
+      setSaveNotice({ type: "saving", message: "Auto-saving..." });
       try {
         await saveAppData("history.json", JSON.stringify(history));
         setSaveNotice({ type: "saved", message: "Auto-saved locally" });
@@ -552,8 +604,8 @@ export default function App() {
         console.error("Save history failed", e);
         setSaveNotice({ type: "error", message: "Auto-save failed", detail: e instanceof Error ? e.message : String(e) });
       }
-    }
-    saveData();
+    }, 700);
+    return () => window.clearTimeout(timer);
   }, [history, loaded, settings.autoSave]);
 
   useEffect(() => {
@@ -580,6 +632,14 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(storageKey("layout:consoleHeight"), String(consoleHeight));
   }, [consoleHeight]);
+
+  useEffect(() => {
+    localStorage.setItem(storageKey("layout:sidebarCollapsed"), String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    localStorage.setItem(storageKey("layout:responseCollapsed"), String(responseCollapsed));
+  }, [responseCollapsed]);
 
   useEffect(() => {
     const normalizeResponseWidth = () => {
@@ -660,9 +720,13 @@ export default function App() {
     setSidebarWidth(305);
     setResponseWidth(610);
     setConsoleHeight(150);
+    setSidebarCollapsed(false);
+    setResponseCollapsed(false);
     localStorage.removeItem(storageKey("layout:sidebarWidth"));
     localStorage.removeItem(storageKey("layout:responseWidth"));
     localStorage.removeItem(storageKey("layout:consoleHeight"));
+    localStorage.removeItem(storageKey("layout:sidebarCollapsed"));
+    localStorage.removeItem(storageKey("layout:responseCollapsed"));
     setSaveNotice({ type: "saved", message: "Layout reset" });
   };
 
@@ -674,6 +738,42 @@ export default function App() {
       setSaveNotice({ type: "saved", message: "Runtime cache cleared" });
     } catch (e) {
       setSaveNotice({ type: "error", message: "Clear cache failed", detail: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
+  const handleClearLocalStorage = async () => {
+    const confirmed = window.confirm(
+      "Clear all local Clotient data? This removes collections, environments, history, settings, layout, and Clotient cache from this device."
+    );
+    if (!confirmed) return;
+
+    const savingNotice: SaveNotice = { type: "saving", message: "Clearing local storage..." };
+    setSaveNotice(savingNotice);
+    showSaveToast(savingNotice);
+    try {
+      await clearAppDataStorage();
+      autoSaveSeen.current = { collections: false, environments: false, history: false };
+      setCollections(defaultCollections);
+      setEnvironments(defaultEnvironments);
+      setHistory([]);
+      setSettings(defaultSettings);
+      setSidebarWidth(305);
+      setResponseWidth(610);
+      setConsoleHeight(150);
+      setSidebarCollapsed(false);
+      setResponseCollapsed(false);
+      const initialRequest = defaultCollections[0]?.requests[0] || createNewBlankRequest();
+      setActiveRequest(initialRequest);
+      setOpenTabIds([initialRequest.id]);
+      setActiveEnv(defaultEnvironments[0] || null);
+      clearRequestRuntime();
+      const savedNotice: SaveNotice = { type: "saved", message: "Local storage cleared", detail: "Workspace reset on this device" };
+      setSaveNotice(savedNotice);
+      showSaveToast(savedNotice);
+    } catch (e) {
+      const errorNotice: SaveNotice = { type: "error", message: "Clear storage failed", detail: e instanceof Error ? e.message : String(e) };
+      setSaveNotice(errorNotice);
+      showSaveToast(errorNotice);
     }
   };
 
@@ -709,6 +809,14 @@ export default function App() {
     );
   };
 
+  const showSaveToast = (notice: SaveNotice) => {
+    setSaveToast(notice);
+    if (saveToastTimer.current) {
+      window.clearTimeout(saveToastTimer.current);
+    }
+    saveToastTimer.current = window.setTimeout(() => setSaveToast(null), notice.type === "saving" ? 1400 : 3200);
+  };
+
   const clearRequestRuntime = () => {
     setResponse(null);
     setLogs([]);
@@ -717,7 +825,9 @@ export default function App() {
   };
 
   const handleManualSave = async () => {
-    setSaveNotice({ type: "saving", message: "Saving changes..." });
+    const savingNotice: SaveNotice = { type: "saving", message: "Saving changes..." };
+    setSaveNotice(savingNotice);
+    showSaveToast(savingNotice);
     try {
       await Promise.all([
         saveAppData("collections.json", JSON.stringify(collections)),
@@ -725,9 +835,13 @@ export default function App() {
         saveAppData("history.json", JSON.stringify(history)),
         saveAppData("settings.json", JSON.stringify(settings))
       ]);
-      setSaveNotice({ type: "saved", message: "Saved locally", detail: new Date().toLocaleTimeString() });
+      const savedNotice: SaveNotice = { type: "saved", message: "Saved locally", detail: new Date().toLocaleTimeString() };
+      setSaveNotice(savedNotice);
+      showSaveToast(savedNotice);
     } catch (e) {
-      setSaveNotice({ type: "error", message: "Save failed", detail: e instanceof Error ? e.message : String(e) });
+      const errorNotice: SaveNotice = { type: "error", message: "Save failed", detail: e instanceof Error ? e.message : String(e) };
+      setSaveNotice(errorNotice);
+      showSaveToast(errorNotice);
     }
   };
 
@@ -1022,7 +1136,7 @@ export default function App() {
       })
     );
     setActiveRequest(newReq);
-    setOpenTabIds((prev) => [newReq.id, ...prev.filter((id) => id !== newReq.id)].slice(0, 8));
+    setOpenTabIds((prev) => [...prev.filter((id) => id !== newReq.id), newReq.id].slice(-8));
     clearRequestRuntime();
   };
 
@@ -1057,10 +1171,10 @@ export default function App() {
     setCollections([...collections, imported]);
     if (imported.requests.length > 0) {
       setActiveRequest(imported.requests[0]);
-      setOpenTabIds((prev) => [imported.requests[0].id, ...prev.filter((id) => id !== imported.requests[0].id)].slice(0, 8));
+      setOpenTabIds((prev) => [...prev.filter((id) => id !== imported.requests[0].id), imported.requests[0].id].slice(-8));
     } else if (imported.folders.length > 0 && imported.folders[0].requests.length > 0) {
       setActiveRequest(imported.folders[0].requests[0]);
-      setOpenTabIds((prev) => [imported.folders[0].requests[0].id, ...prev.filter((id) => id !== imported.folders[0].requests[0].id)].slice(0, 8));
+      setOpenTabIds((prev) => [...prev.filter((id) => id !== imported.folders[0].requests[0].id), imported.folders[0].requests[0].id].slice(-8));
     }
   };
 
@@ -1083,8 +1197,21 @@ export default function App() {
 
   const activateRequest = (request: ClotientRequest) => {
     setActiveRequest(request);
-    setOpenTabIds((prev) => [request.id, ...prev.filter((id) => id !== request.id)].slice(0, 8));
+    setOpenTabIds((prev) => (prev.includes(request.id) ? prev : [...prev, request.id].slice(-8)));
     clearRequestRuntime();
+  };
+
+  const reorderTabs = (fromId: string, toId: string) => {
+    if (fromId === toId) return;
+    setOpenTabIds((prev) => {
+      const fromIndex = prev.indexOf(fromId);
+      const toIndex = prev.indexOf(toId);
+      if (fromIndex < 0 || toIndex < 0) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIndex, 1);
+      next.splice(toIndex, 0, moved);
+      return next;
+    });
   };
 
   const closeTab = (requestId: string) => {
@@ -1126,7 +1253,8 @@ export default function App() {
         collections={collections}
         environments={environments}
         history={history}
-        width={sidebarWidth}
+        width={sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : sidebarWidth}
+        collapsed={sidebarCollapsed}
         resourceMetrics={resourceMetrics}
         confirmBeforeDelete={settings.confirmBeforeDelete}
         activeRequest={activeRequest}
@@ -1142,6 +1270,7 @@ export default function App() {
         onUpdateEnvironments={setEnvironments}
         onClearHistory={() => setHistory([])}
         onStartResize={handleSidebarResize}
+        onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
       />
 
       {/* Main Request Workspace Panel */}
@@ -1152,8 +1281,25 @@ export default function App() {
               openTabs.map(({ request, path }, index) => (
                 <button
                   key={`${request.id}-${index}`}
-                  className={`ct-request-tab ${request.id === activeRequest?.id ? "active" : ""}`}
+                  className={`ct-request-tab ${request.id === activeRequest?.id ? "active" : ""} ${draggedTabId === request.id ? "dragging" : ""}`}
                   title={`${path} · ${request.url}`}
+                  draggable
+                  onDragStart={(event) => {
+                    setDraggedTabId(request.id);
+                    event.dataTransfer.effectAllowed = "move";
+                    event.dataTransfer.setData("text/plain", request.id);
+                  }}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    const fromId = event.dataTransfer.getData("text/plain") || draggedTabId;
+                    if (fromId) reorderTabs(fromId, request.id);
+                    setDraggedTabId(null);
+                  }}
+                  onDragEnd={() => setDraggedTabId(null)}
                   onClick={() => activateRequest(request)}
                 >
                   <span className={`ct-method ${request.method}`}>{request.method}</span>
@@ -1161,6 +1307,7 @@ export default function App() {
                   <span
                     className="ct-tab-close"
                     title="Close tab"
+                    draggable={false}
                     onClick={(event) => {
                       event.stopPropagation();
                       closeTab(request.id);
@@ -1244,7 +1391,7 @@ export default function App() {
         </header>
 
         <div className="ct-content">
-        <div className="ct-workspace" style={{ gridTemplateColumns: `minmax(0, 1fr) ${responseWidth}px` }}>
+        <div className="ct-workspace" style={{ gridTemplateColumns: `minmax(0, 1fr) ${responseCollapsed ? RESPONSE_COLLAPSED_WIDTH : responseWidth}px` }}>
         {activeRequest ? (
           <>
             {/* Upper: Request Builder */}
@@ -1265,16 +1412,30 @@ export default function App() {
             </div>
 
             {/* Right: Response Viewer */}
-            <div className="ct-response-pane">
-              <div className="ct-resize-handle ct-response-resize" onMouseDown={handleResponseResize} title="Resize response panel" />
-              <ResponseViewer
-                response={response}
-                loading={loadingRequest}
-                logs={logs}
-                assertions={assertions}
-                errorMsg={errorMsg}
-                compact={settings.compactResponse}
-              />
+            <div className={`ct-response-pane ${responseCollapsed ? "collapsed" : ""}`}>
+              {responseCollapsed ? (
+                <div className="ct-response-rail">
+                  <button className="ct-side-collapse-button" title="Expand response panel" onClick={() => setResponseCollapsed(false)}>
+                    <ChevronLeft size={16} />
+                  </button>
+                  <span>Response</span>
+                </div>
+              ) : (
+                <>
+                  <div className="ct-resize-handle ct-response-resize" onMouseDown={handleResponseResize} title="Resize response panel" />
+                  <button className="ct-response-collapse-button" title="Collapse response panel" onClick={() => setResponseCollapsed(true)}>
+                    <ChevronRight size={16} />
+                  </button>
+                  <ResponseViewer
+                    response={response}
+                    loading={loadingRequest}
+                    logs={logs}
+                    assertions={assertions}
+                    errorMsg={errorMsg}
+                    compact={settings.compactResponse}
+                  />
+                </>
+              )}
             </div>
           </>
         ) : (
@@ -1337,8 +1498,19 @@ export default function App() {
           onSave={handleManualSave}
           onResetLayout={handleResetLayout}
           onClearRuntimeCache={handleClearRuntimeCache}
+          onClearLocalStorage={handleClearLocalStorage}
           onClose={() => setShowSettingsModal(false)}
         />
+      )}
+
+      {saveToast && (
+        <div className={`ct-save-toast ${saveToast.type}`}>
+          {saveToast.type === "error" ? <AlertCircle size={17} /> : <CheckCircle2 size={17} />}
+          <div>
+            <strong>{saveToast.message}</strong>
+            {saveToast.detail && <span>{saveToast.detail}</span>}
+          </div>
+        </div>
       )}
 
       {/* Custom dialog prompt overlay modal */}
@@ -1562,6 +1734,7 @@ function SettingsModal({
   onSave,
   onResetLayout,
   onClearRuntimeCache,
+  onClearLocalStorage,
   onClose
 }: {
   settings: AppSettings;
@@ -1571,6 +1744,7 @@ function SettingsModal({
   onSave: () => void;
   onResetLayout: () => void;
   onClearRuntimeCache: () => void;
+  onClearLocalStorage: () => void;
   onClose: () => void;
 }) {
   const update = (fields: Partial<AppSettings>) => onChange({ ...settings, ...fields });
@@ -1657,6 +1831,9 @@ function SettingsModal({
               </button>
               <button className="ct-secondary h-9 px-3 flex items-center gap-2" onClick={onClearRuntimeCache}>
                 <Trash2 size={15} /> Clear runtime cache
+              </button>
+              <button className="ct-danger h-9 px-3 flex items-center gap-2" onClick={onClearLocalStorage}>
+                <Trash2 size={15} /> Clear local storage
               </button>
             </div>
           </div>

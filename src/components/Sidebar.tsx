@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { MouseEvent } from "react";
 import {
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Download,
   Folder,
@@ -19,6 +20,7 @@ interface SidebarProps {
   environments: Environment[];
   history: HistoryItem[];
   width: number;
+  collapsed: boolean;
   resourceMetrics: ResourceMetrics;
   confirmBeforeDelete: boolean;
   activeRequest: ClotientRequest | null;
@@ -34,6 +36,7 @@ interface SidebarProps {
   onUpdateEnvironments: (envs: Environment[]) => void;
   onClearHistory: () => void;
   onStartResize: (event: MouseEvent<HTMLDivElement>) => void;
+  onToggleCollapsed: () => void;
 }
 
 export interface ResourceMetrics {
@@ -63,6 +66,7 @@ export default function Sidebar({
   environments,
   history,
   width,
+  collapsed,
   resourceMetrics,
   confirmBeforeDelete,
   activeRequest,
@@ -77,10 +81,12 @@ export default function Sidebar({
   onImportCollection,
   onUpdateEnvironments,
   onClearHistory,
-  onStartResize
+  onStartResize,
+  onToggleCollapsed
 }: SidebarProps) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [showEnvModal, setShowEnvModal] = useState(false);
+  const [showCollectionMenu, setShowCollectionMenu] = useState(false);
   const [dialog, setDialog] = useState<{
     title: string;
     message?: string;
@@ -132,6 +138,7 @@ export default function Sidebar({
   };
 
   const handleImportClick = () => {
+    setShowCollectionMenu(false);
     const input = document.createElement("input");
     input.type = "file";
     input.accept = ".json";
@@ -148,6 +155,7 @@ export default function Sidebar({
   };
 
   const handleExport = (collection: ClotientCollection) => {
+    setShowCollectionMenu(false);
     const postmanJson = exportToPostmanCollection(collection);
     const blob = new Blob([JSON.stringify(postmanJson, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -158,6 +166,35 @@ export default function Sidebar({
     URL.revokeObjectURL(url);
   };
 
+  const activeCollection =
+    collections.find((collection) =>
+      collection.requests.some((request) => request.id === activeRequest?.id) ||
+      collection.folders.some((folder) => folder.requests.some((request) => request.id === activeRequest?.id))
+    ) || collections[0];
+
+  const deleteCollection = (collection: ClotientCollection) => {
+    setShowCollectionMenu(false);
+    showConfirm("Delete collection", `Delete "${collection.name}"?`, () => onDeleteCollection(collection.id));
+  };
+
+  if (collapsed) {
+    return (
+      <aside className="ct-sidebar collapsed shrink-0 h-full bg-white border-r border-slate-200 flex flex-col items-center select-none" style={{ width }}>
+        <div className="h-[76px] w-full border-b border-slate-200 flex items-center justify-center">
+          <img src="/logo.png" className="w-8 h-8 rounded-lg" alt="Clotient" />
+        </div>
+        <button className="ct-side-collapse-button mt-3" title="Expand sidebar" onClick={onToggleCollapsed}>
+          <ChevronRight size={16} />
+        </button>
+        <button className="ct-side-rail-button mt-2" title="New collection" onClick={() => showPrompt("New collection", "Collection name", "New Collection", onCreateCollection)}>
+          <Plus size={16} />
+        </button>
+        <div className="flex-1" />
+        <span className="mb-4 h-2 w-2 rounded-full bg-emerald-500" title="Online" />
+      </aside>
+    );
+  }
+
   return (
     <aside className="ct-sidebar shrink-0 h-full bg-white border-r border-slate-200 flex flex-col select-none" style={{ width }}>
       <div className="h-[76px] px-5 border-b border-slate-200 flex items-center gap-3">
@@ -165,6 +202,9 @@ export default function Sidebar({
         <div className="min-w-0">
           <div className="text-[22px] font-semibold tracking-tight text-slate-950 leading-none">Clotient</div>
         </div>
+        <button className="ct-side-collapse-button ml-auto" title="Collapse sidebar" onClick={onToggleCollapsed}>
+          <ChevronLeft size={16} />
+        </button>
       </div>
 
       <div className="h-[94px] px-5 py-4 border-b border-slate-200">
@@ -189,9 +229,38 @@ export default function Sidebar({
               <button className="text-slate-400 hover:text-blue-600" onClick={() => showPrompt("New collection", "Collection name", "New Collection", onCreateCollection)}>
                 <Plus size={15} />
               </button>
-              <button className="text-slate-400 hover:text-blue-600" onClick={handleImportClick}>
-                <MoreHorizontal size={16} />
-              </button>
+              <div className="ct-sidebar-menu-wrap">
+                <button className="text-slate-400 hover:text-blue-600" onClick={() => setShowCollectionMenu((value) => !value)}>
+                  <MoreHorizontal size={16} />
+                </button>
+                {showCollectionMenu && (
+                  <div className="ct-sidebar-menu">
+                    <button onClick={() => { setShowCollectionMenu(false); showPrompt("New collection", "Collection name", "New Collection", onCreateCollection); }}>
+                      <Plus size={14} /> New collection
+                    </button>
+                    <button onClick={handleImportClick}>
+                      <Download size={14} /> Import Postman JSON
+                    </button>
+                    {activeCollection && (
+                      <>
+                        <div className="ct-sidebar-menu-label">{activeCollection.name}</div>
+                        <button onClick={() => { setShowCollectionMenu(false); showPrompt("New request", "Request name", "/v1/users", (value) => onCreateRequest(activeCollection.id, null, value)); }}>
+                          <Plus size={14} /> New request
+                        </button>
+                        <button onClick={() => { setShowCollectionMenu(false); showPrompt("New folder", "Folder name", "New Folder", (value) => onCreateFolder(activeCollection.id, value)); }}>
+                          <Folder size={14} /> New folder
+                        </button>
+                        <button onClick={() => handleExport(activeCollection)}>
+                          <Download size={14} /> Export Postman collection
+                        </button>
+                        <button className="danger" onClick={() => deleteCollection(activeCollection)}>
+                          <Trash2 size={14} /> Delete collection
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           }
         >
