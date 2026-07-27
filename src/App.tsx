@@ -16,7 +16,7 @@ import { resolveVariables } from "./utils/envResolver";
 
 const uuid = () => Math.random().toString(36).substring(2, 11);
 const storageKey = (fileName: string) => `clotient:${fileName}`;
-const REPOSITORY_URL = "https://github.com/Irfan-Ahmad-byte/clotient";
+const REPOSITORY_URL = "https://github.com/Clottis/clotient";
 const hasTauriRuntime = () => typeof window !== "undefined" && Boolean((window as any).__TAURI_INTERNALS__);
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 const SIDEBAR_MIN = 245;
